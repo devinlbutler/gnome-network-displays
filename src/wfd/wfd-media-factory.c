@@ -541,6 +541,12 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
   if (encoder_impl == ELEMENT_VAAPIH264)
     quirks = WFD_QUIRK_NO_IDR;
 
+  if (params->rtcp_port_invalid)
+    {
+      g_debug ("WfdMediaFactory: Detected potential RTCP port issue, disabling keep-alive");
+      quirks |= WFD_QUIRK_NO_KEEPALIVE;
+    }
+
   /* Decrease the number of keyframes if the device is able to request
    * IDRs by itself.
    * Note that VAAPI H264 appears to run into an assertion error in version 1.14.4 */

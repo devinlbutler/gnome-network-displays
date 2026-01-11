@@ -369,12 +369,25 @@ wfd_client_timeout_session_filter_func (GstRTSPClient  *client,
                                         gpointer        user_data)
 {
   GstRTSPMessage msg = { 0 };
+  GstRTSPConnection *connection;
+  GstRTSPResult res;
+
+  connection = gst_rtsp_client_get_connection (client);
+  if (!connection)
+    {
+      g_debug ("WfdClient: No connection, skipping keep-alive");
+      return GST_RTSP_FILTER_REMOVE;
+    }
 
   g_debug ("WfdClient: Doing keep-alive");
 
   gst_rtsp_message_init_request (&msg, GST_RTSP_GET_PARAMETER, "rtsp://localhost/wfd1.0");
 
-  gst_rtsp_client_send_message (client, sess, &msg);
+  res = gst_rtsp_client_send_message (client, sess, &msg);
+  if (res != GST_RTSP_OK)
+    {
+      g_debug ("WfdClient: Keep-alive send failed: %d (continuing anyway)", res);
+    }
 
   gst_rtsp_message_unset (&msg);
 
@@ -385,6 +398,20 @@ static gboolean
 wfd_client_keep_alive_timeout (gpointer user_data)
 {
   GstRTSPClient *client = GST_RTSP_CLIENT (user_data);
+  WfdClient *self = WFD_CLIENT (client);
+  GstRTSPConnection *connection;
+
+  connection = gst_rtsp_client_get_connection (client);
+  if (!connection)
+    {
+      g_debug ("WfdClient: No connection, disabling keep-alive");
+      if (self->keep_alive_source_id)
+        {
+          g_source_remove (self->keep_alive_source_id);
+          self->keep_alive_source_id = 0;
+        }
+      return G_SOURCE_REMOVE;
+    }
 
   gst_rtsp_client_session_filter (client, wfd_client_timeout_session_filter_func, NULL);
 
@@ -396,12 +423,15 @@ wfd_client_new_session (GstRTSPClient *client, GstRTSPSession *session)
 {
   WfdClient *self = WFD_CLIENT (client);
 
-  /* The WFD standard suggests a timeout of 30 seconds */
   gst_rtsp_session_set_timeout (session, 30);
   g_object_set (session, "timeout-always-visible", FALSE, NULL);
 
-  if (self->connection_type == CONNECTION_TYPE_WFD && self->keep_alive_source_id == 0)
-    self->keep_alive_source_id = g_timeout_add_seconds (25, wfd_client_keep_alive_timeout, client);
+  if (self->connection_type == CONNECTION_TYPE_WFD && 
+      self->keep_alive_source_id == 0)
+    {
+      g_debug ("WfdClient: Enabling keep-alive timer");
+      self->keep_alive_source_id = g_timeout_add_seconds (25, wfd_client_keep_alive_timeout, client);
+    }
 }
 
 static GstRTSPResult

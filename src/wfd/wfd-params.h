@@ -14,6 +14,7 @@ struct _WfdParams
   gchar         *profile;
   guint16        primary_rtp_port;
   guint16        secondary_rtp_port;
+  gboolean       rtcp_port_invalid;
   GByteArray    *edid;
 
   gboolean       idr_request_capability;

@@ -86,6 +86,7 @@ wfd_params_copy (WfdParams *self)
 
   copy->primary_rtp_port = self->primary_rtp_port;
   copy->secondary_rtp_port = self->secondary_rtp_port;
+  copy->rtcp_port_invalid = self->rtcp_port_invalid;
   if (self->edid)
     {
       copy->edid = g_byte_array_new ();
@@ -225,6 +226,26 @@ wfd_params_from_sink (WfdParams *self, const guint8 *body, gsize body_size)
 
           self->primary_rtp_port = g_ascii_strtoll (split_value[1], NULL, 10);
           self->secondary_rtp_port = g_ascii_strtoll (split_value[2], NULL, 10);
+          
+          if (self->secondary_rtp_port == 0)
+            {
+              g_warning ("WfdParams: Missing RTCP port (secondary_rtp_port=0, primary_rtp_port=%u). "
+                        "Auto-correcting to primary_rtp_port + 1.",
+                        self->primary_rtp_port);
+              self->rtcp_port_invalid = TRUE;
+              self->secondary_rtp_port = self->primary_rtp_port + 1;
+            }
+          else if (self->secondary_rtp_port == self->primary_rtp_port)
+            {
+              g_warning ("WfdParams: Invalid RTCP port (secondary_rtp_port=%u equals primary_rtp_port=%u). "
+                        "Auto-correcting to primary_rtp_port + 1.",
+                        self->secondary_rtp_port, self->primary_rtp_port);
+              self->rtcp_port_invalid = TRUE;
+              self->secondary_rtp_port = self->primary_rtp_port + 1;
+            }
+          
+          g_debug ("WfdParams: RTP ports - primary=%u, secondary (RTCP)=%u", 
+                   self->primary_rtp_port, self->secondary_rtp_port);
         }
       else if (g_str_equal (option, "wfd_video_formats"))
         {

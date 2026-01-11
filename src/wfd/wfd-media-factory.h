@@ -75,6 +75,7 @@ static const WfdMediaFactoryProfile wfd_media_factory_profiles[] = {
 
 typedef enum {
   WFD_QUIRK_NO_IDR = 0x01,
+  WFD_QUIRK_NO_KEEPALIVE = 0x02,
 } WfdMediaQuirks;
 
 WfdMediaFactory * wfd_media_factory_new (void);
