@@ -126,6 +126,7 @@ static void
 nd_sink_row_init (NdSinkRow *self)
 {
   gtk_list_box_row_set_activatable (GTK_LIST_BOX_ROW (self), TRUE);
+  adw_preferences_row_set_use_markup (ADW_PREFERENCES_ROW (self), FALSE);
 }
 
 /**
