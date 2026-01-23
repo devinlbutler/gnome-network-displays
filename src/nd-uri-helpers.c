@@ -42,15 +42,14 @@ nd_uri_helpers_generate_uri (GHashTable *params)
   g_autoptr(GStrvBuilder) strv_builder = g_strv_builder_new ();
   GHashTableIter iter;
   gpointer key, value;
-  gpointer key_parsed, value_parsed;
   g_hash_table_iter_init (&iter, params);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
-      key_parsed = g_uri_escape_string (key, G_URI_RESERVED_CHARS_GENERIC_DELIMITERS, FALSE);
-      value_parsed = g_uri_escape_string (value, G_URI_RESERVED_CHARS_GENERIC_DELIMITERS, FALSE);
+      g_autofree gchar *key_escaped = g_uri_escape_string (key, G_URI_RESERVED_CHARS_GENERIC_DELIMITERS, FALSE);
+      g_autofree gchar *value_escaped = g_uri_escape_string (value, G_URI_RESERVED_CHARS_GENERIC_DELIMITERS, FALSE);
+      g_autofree gchar *param_str = g_strdup_printf ("%s=%s", key_escaped, value_escaped);
 
-      g_strv_builder_add (strv_builder,
-                          g_strdup_printf ("%s=%s", (gchar *) key_parsed, (gchar *) value_parsed));
+      g_strv_builder_add (strv_builder, param_str);
     }
 
   g_auto(GStrv) params_array = g_strv_builder_end (strv_builder);

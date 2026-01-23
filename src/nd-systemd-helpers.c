@@ -31,7 +31,7 @@ build_execstart (const gchar *uuid,
 static GVariant *
 build_description (const gchar *name)
 {
-  const gchar *desc = g_strdup_printf ("GNOME Network Displays stream for %s", name);
+  g_autofree gchar *desc = g_strdup_printf ("GNOME Network Displays stream for %s", name);
 
   GVariant *description;
 

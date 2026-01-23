@@ -202,16 +202,17 @@ on_pa_nd_sink_got_info (pa_context         *c,
   g_debug ("NdPulseaudio: Creating sink for: %s", self->name);
   /* We have reached the list end without being cancelled first.
    * This means no screencast sink exist, and we need to create it. */
+  g_autofree gchar *module_args = g_strdup_printf ("sink_name=" ND_PA_SINK "_%.8s"
+                                                   " "
+                                                   "rate=48000 "
+                                                   "sink_properties=device.class=\"sound\" "
+                                                   "device.icon_name=\"network-wireless\" "
+                                                   "device.description=\"%s\"",
+                                                   self->uuid,
+                                                   self->name);
   self->operation = pa_context_load_module (self->context,
                                             "module-null-sink",
-                                            g_strdup_printf ("sink_name=" ND_PA_SINK "_%.8s"
-                                                             " "
-                                                             "rate=48000 "
-                                                             "sink_properties=device.class=\"sound\" "
-                                                             "device.icon_name=\"network-wireless\" "
-                                                             "device.description=\"%s\"",
-                                                             self->uuid,
-                                                             self->name),
+                                            module_args,
                                             on_pa_null_module_loaded,
                                             self);
 }
@@ -267,8 +268,9 @@ nd_pulseaudio_state_cb (pa_context *context,
         return;
 
       g_debug ("NdPulseaudio: Querying sink info by name");
+      g_autofree gchar *sink_name = g_strdup_printf (ND_PA_SINK "_%.8s", self->uuid);
       self->operation = pa_context_get_sink_info_by_name (self->context,
-                                                          g_strdup_printf (ND_PA_SINK "_%.8s", self->uuid),
+                                                          sink_name,
                                                           on_pa_nd_sink_got_info,
                                                           self);
       break;
@@ -309,8 +311,10 @@ nd_pulseaudio_async_initable_init_async (GAsyncInitable     *initable,
   self->mainloop_api = pa_threaded_mainloop_get_api (self->mainloop);
 
   proplist = pa_proplist_new ();
-  pa_proplist_sets (proplist, PA_PROP_APPLICATION_NAME, g_strdup_printf ("GNOME Network Displays PulseAudio Client for %s", self->name));
-  pa_proplist_sets (proplist, PA_PROP_APPLICATION_ID, g_strdup_printf ("org.gnome.NetworkDisplays.PulseAudio_%.8s", self->uuid));
+  g_autofree gchar *app_name = g_strdup_printf ("GNOME Network Displays PulseAudio Client for %s", self->name);
+  g_autofree gchar *app_id = g_strdup_printf ("org.gnome.NetworkDisplays.PulseAudio_%.8s", self->uuid);
+  pa_proplist_sets (proplist, PA_PROP_APPLICATION_NAME, app_name);
+  pa_proplist_sets (proplist, PA_PROP_APPLICATION_ID, app_id);
   /* pa_proplist_sets (proplist, PA_PROP_APPLICATION_ICON_NAME, ); */
 
   self->context = pa_context_new_with_proplist (self->mainloop_api, NULL, proplist);
@@ -382,6 +386,8 @@ nd_pulseaudio_finalize (GObject *object)
   self->mainloop_api = NULL;
   pa_threaded_mainloop_stop (self->mainloop);
   g_clear_pointer (&self->mainloop, pa_threaded_mainloop_free);
+  g_clear_pointer (&self->name, g_free);
+  g_clear_pointer (&self->uuid, g_free);
 
   G_OBJECT_CLASS (nd_pulseaudio_parent_class)->finalize (object);
 }
@@ -426,11 +432,14 @@ nd_pulseaudio_get_source (NdPulseaudio *self)
   g_assert (self->init_task == NULL);
   g_assert (self->context != NULL);
 
-  src = gst_element_factory_make ("pulsesrc", g_strdup_printf ("pulseaudio-source-%s", self->uuid));
+  g_autofree gchar *element_name = g_strdup_printf ("pulseaudio-source-%s", self->uuid);
+  src = gst_element_factory_make ("pulsesrc", element_name);
 
+  g_autofree gchar *device_name = g_strdup_printf (ND_PA_SINK "_%.8s.monitor", self->uuid);
+  g_autofree gchar *client_name = g_strdup_printf ("GNOME Network Displays Audio Grabber for %s", self->name);
   g_object_set (src,
-                "device", g_strdup_printf (ND_PA_SINK "_%.8s.monitor", self->uuid),
-                "client-name", g_strdup_printf ("GNOME Network Displays Audio Grabber for %s", self->name),
+                "device", device_name,
+                "client-name", client_name,
                 "do-timestamp", TRUE,
                 "server", pa_context_get_server (self->context),
                 NULL);

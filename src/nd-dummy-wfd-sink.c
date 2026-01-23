@@ -172,10 +172,10 @@ nd_dummy_wfd_sink_init (NdDummyWFDSink *sink)
 static gchar *
 nd_dummy_wfd_sink_sink_to_uri (NdSink *sink)
 {
-  GHashTable *params = g_hash_table_new (g_str_hash, g_str_equal);
+  g_autoptr(GHashTable) params = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
 
   /* protocol */
-  g_hash_table_insert (params, "protocol", (gpointer *) g_strdup_printf ("%d", protocol));
+  g_hash_table_insert (params, "protocol", g_strdup_printf ("%d", protocol));
 
   return nd_uri_helpers_generate_uri (params);
 }

@@ -54,9 +54,10 @@ cc_ctrl_send_connect (CcCtrl *ctrl, gchar *destination_id)
 #else
   gchar *platform = "Wayland; Linux x86_64";
 #endif
+  g_autofree gchar *user_agent = g_strdup_printf ("GND/%s (%s)", PACKAGE_VERSION, platform);
   gchar *json = cc_json_helper_build_string (
     "type", CC_JSON_TYPE_STRING, "CONNECT",
-    "userAgent", CC_JSON_TYPE_STRING, g_strdup_printf ("GND/%s (%s)", PACKAGE_VERSION, platform),
+    "userAgent", CC_JSON_TYPE_STRING, user_agent,
     "connType", CC_JSON_TYPE_INT, 0,
     "origin", CC_JSON_TYPE_OBJECT, cc_json_helper_build_node (NULL),
     "senderInfo", CC_JSON_TYPE_OBJECT, cc_json_helper_build_node (
@@ -229,12 +230,13 @@ cc_ctrl_send_load (CcCtrl *ctrl, gchar *sessionId)
 
   g_array_append_val (tracks, track_node);
 
+  g_autofree gchar *content_url = g_strdup_printf ("http://%s:%d/",
+                                                    ctrl->comm.local_address,
+                                                    port);
   gchar *json = cc_json_helper_build_string (
     "type", CC_JSON_TYPE_STRING, "LOAD",
     "media", CC_JSON_TYPE_OBJECT, cc_json_helper_build_node (
-      "contentUrl", CC_JSON_TYPE_STRING, g_strdup_printf ("http://%s:%d/",
-                                                          ctrl->comm.local_address,
-                                                          port),
+      "contentUrl", CC_JSON_TYPE_STRING, content_url,
       "streamType", CC_JSON_TYPE_STRING, "LIVE",
       "contentType", CC_JSON_TYPE_STRING, content_types[cc_media_factory_profiles[factory->factory_profile].muxer],
       NULL),

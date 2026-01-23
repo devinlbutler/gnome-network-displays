@@ -131,9 +131,10 @@ nd_window_screencast_get_source (NdWindow * self)
   if (src == NULL)
     g_error ("GStreamer element \"pipewiresrc\" could not be created!");
 
+  g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
   g_object_set (src,
                 "fd", xdp_session_open_pipewire_remote (self->session),
-                "path", g_strdup_printf ("%u", node_id),
+                "path", path_str,
                 "do-timestamp", TRUE,
                 NULL);
 

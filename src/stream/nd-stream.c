@@ -144,15 +144,18 @@ nd_stream_get_source (NdStream *self)
 
   g_object_get (self->sink, "uuid", &uuid, NULL);
 
-  src = gst_element_factory_make ("pipewiresrc", g_strdup_printf ("portal-pipewire-source-%.8s", uuid));
+  g_autofree gchar *element_name = g_strdup_printf ("portal-pipewire-source-%.8s", uuid);
+  src = gst_element_factory_make ("pipewiresrc", element_name);
   if (src == NULL)
     g_error ("GStreamer element \"pipewiresrc\" could not be created!");
 
+  g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
   g_object_set (src,
                 "fd", xdp_session_open_pipewire_remote (self->session),
-                "path", g_strdup_printf ("%u", node_id),
+                "path", path_str,
                 "do-timestamp", TRUE,
                 NULL);
+  g_free (uuid);
 
   gst_base_src_set_live (GST_BASE_SRC (src), TRUE);
 
@@ -502,7 +505,7 @@ nd_screencast_init_cb (GObject      *source_object,
   g_object_get (sink, "display-name", &name, NULL);
   g_object_get (sink, "uuid", &uuid, NULL);
 
-  self->pulse = nd_pulseaudio_new (g_strdup (name), g_strdup (uuid));
+  self->pulse = nd_pulseaudio_new (name, uuid);
   g_async_initable_init_async (G_ASYNC_INITABLE (self->pulse),
                                G_PRIORITY_LOW,
                                self->cancellable,
@@ -587,12 +590,12 @@ NdStream *
 nd_stream_new ()
 {
   NdStream *stream;
-  gchar * uuid = g_uuid_string_random ();
-  gchar * id = g_strdup_printf ("org.gnome.NetworkDisplays.Stream_%.8s", uuid);
+  g_autofree gchar *uuid = g_uuid_string_random ();
+  g_autofree gchar *id = g_strdup_printf ("org.gnome.NetworkDisplays.Stream_%.8s", uuid);
 
   g_debug ("NdStream: Starting with app-id: %s", id);
   stream = g_object_new (ND_TYPE_STREAM,
-                         "application-id", g_strdup (id),
+                         "application-id", id,
                          "flags", G_APPLICATION_HANDLES_OPEN,
                          NULL);
 

@@ -126,7 +126,7 @@ nd_manager_start_transient_unit (NdManager   *manager,
                                  const gchar *uuid,
                                  const gchar *display_name)
 {
-  const gchar *unit_name = g_strdup_printf ("gnome-network-displays-stream-%s.service", uuid);
+  g_autofree gchar *unit_name = g_strdup_printf ("gnome-network-displays-stream-%s.service", uuid);
 
   g_autoptr(GError) error = NULL;
 
