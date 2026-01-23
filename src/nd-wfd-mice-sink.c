@@ -45,6 +45,7 @@ struct _NdWFDMiceSink
   GSocketConnection *signalling_client_conn;
 
   WfdServer         *server;
+  WfdClient         *wfd_client;
   guint              server_source_id;
 };
 
@@ -420,10 +421,16 @@ signalling_client_send (NdWFDMiceSink * self,
 static void
 closed_cb (NdWFDMiceSink *sink, WfdClient *client)
 {
-  g_autoptr(GError) error = NULL;
+  if (sink->state == ND_SINK_STATE_DISCONNECTED)
+    return;
 
-  /* Connection was closed, do a clean shutdown*/
-  nd_wfd_mice_sink_sink_stop_stream (ND_SINK (sink));
+  if (sink->wfd_client == NULL)
+    return;
+
+  nd_wfd_mice_sink_sink_stop_stream_int (sink);
+
+  sink->state = ND_SINK_STATE_DISCONNECTED;
+  g_object_notify (G_OBJECT (sink), "state");
 }
 
 static void
@@ -435,7 +442,8 @@ client_connected_cb (NdWFDMiceSink *sink, WfdClient *client, WfdServer *server)
   sink->state = ND_SINK_STATE_WAIT_STREAMING;
   g_object_notify (G_OBJECT (sink), "state");
 
-  /* XXX: connect to further events. */
+  sink->wfd_client = g_object_ref (client);
+
   g_signal_connect_object (client,
                            "play-request",
                            (GCallback) play_request_cb,
@@ -644,6 +652,12 @@ nd_wfd_mice_sink_sink_stop_stream_int (NdWFDMiceSink *self)
       self->server_source_id = 0;
     }
 
+  if (self->wfd_client)
+    {
+      g_signal_handlers_disconnect_by_data (self->wfd_client, self);
+      g_clear_object (&self->wfd_client);
+    }
+
   /* Needs to protect against recursion. */
   if (self->server)
     {
@@ -659,6 +673,9 @@ static void
 nd_wfd_mice_sink_sink_stop_stream (NdSink *sink)
 {
   NdWFDMiceSink *self = ND_WFD_MICE_SINK (sink);
+
+  if (self->state == ND_SINK_STATE_DISCONNECTED)
+    return;
 
   nd_wfd_mice_sink_sink_stop_stream_int (self);
 

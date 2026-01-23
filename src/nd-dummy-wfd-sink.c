@@ -36,6 +36,7 @@ struct _NdDummyWFDSink
   GtkStringList *missing_audio_codec;
 
   WfdServer     *server;
+  WfdClient     *wfd_client;
   guint          server_source_id;
 };
 
@@ -203,7 +204,12 @@ play_request_cb (NdDummyWFDSink *sink, GstRTSPContext *ctx, WfdClient *client)
 static void
 closed_cb (NdDummyWFDSink *sink, WfdClient *client)
 {
-  /* Connection was closed, do a clean shutdown*/
+  if (sink->state == ND_SINK_STATE_DISCONNECTED)
+    return;
+
+  if (sink->wfd_client == NULL)
+    return;
+
   nd_dummy_wfd_sink_sink_stop_stream (ND_SINK (sink));
 }
 
@@ -216,7 +222,8 @@ client_connected_cb (NdDummyWFDSink *sink, WfdClient *client, WfdServer *server)
   sink->state = ND_SINK_STATE_WAIT_STREAMING;
   g_object_notify (G_OBJECT (sink), "state");
 
-  /* XXX: connect to further events. */
+  sink->wfd_client = g_object_ref (client);
+
   g_signal_connect_object (client,
                            "play-request",
                            (GCallback) play_request_cb,
@@ -322,10 +329,13 @@ error:
   return g_object_ref (sink);
 }
 
-void
+static void
 nd_dummy_wfd_sink_sink_stop_stream (NdSink *sink)
 {
   NdDummyWFDSink *self = ND_DUMMY_WFD_SINK (sink);
+
+  if (self->state == ND_SINK_STATE_DISCONNECTED)
+    return;
 
   if (self->server_source_id)
     {
@@ -333,7 +343,12 @@ nd_dummy_wfd_sink_sink_stop_stream (NdSink *sink)
       self->server_source_id = 0;
     }
 
-  /* Needs to protect against recursion. */
+  if (self->wfd_client)
+    {
+      g_signal_handlers_disconnect_by_data (self->wfd_client, self);
+      g_clear_object (&self->wfd_client);
+    }
+
   if (self->server)
     {
       g_autoptr(WfdServer) server = NULL;

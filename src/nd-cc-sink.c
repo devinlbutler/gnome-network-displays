@@ -259,6 +259,9 @@ nd_cc_sink_sink_stop_stream (NdSink *sink)
 {
   NdCCSink *self = ND_CC_SINK (sink);
 
+  if (self->state == ND_SINK_STATE_DISCONNECTED)
+    return;
+
   nd_cc_sink_sink_stop_stream_int (self);
 
   self->state = ND_SINK_STATE_DISCONNECTED;

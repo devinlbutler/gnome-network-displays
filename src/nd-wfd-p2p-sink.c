@@ -44,6 +44,7 @@ struct _NdWFDP2PSink
   char               *missing_firewall_zone;
 
   WfdServer          *server;
+  WfdClient          *wfd_client;
   guint               server_source_id;
 };
 
@@ -347,8 +348,16 @@ play_request_cb (NdWFDP2PSink *sink, GstRTSPContext *ctx, WfdClient *client)
 static void
 closed_cb (NdWFDP2PSink *sink, WfdClient *client)
 {
-  /* Connection was closed, do a clean shutdown*/
-  nd_wfd_p2p_sink_sink_stop_stream (ND_SINK (sink));
+  if (sink->state == ND_SINK_STATE_DISCONNECTED)
+    return;
+
+  if (sink->wfd_client == NULL)
+    return;
+
+  nd_wfd_p2p_sink_sink_stop_stream_int (sink);
+
+  sink->state = ND_SINK_STATE_DISCONNECTED;
+  g_object_notify (G_OBJECT (sink), "state");
 }
 
 static void
@@ -360,7 +369,8 @@ client_connected_cb (NdWFDP2PSink *sink, WfdClient *client, WfdServer *server)
   sink->state = ND_SINK_STATE_WAIT_STREAMING;
   g_object_notify (G_OBJECT (sink), "state");
 
-  /* XXX: connect to further events. */
+  sink->wfd_client = g_object_ref (client);
+
   g_signal_connect_object (client,
                            "play-request",
                            (GCallback) play_request_cb,
@@ -609,6 +619,12 @@ nd_wfd_p2p_sink_sink_stop_stream_int (NdWFDP2PSink *self)
       self->server_source_id = 0;
     }
 
+  if (self->wfd_client)
+    {
+      g_signal_handlers_disconnect_by_data (self->wfd_client, self);
+      g_clear_object (&self->wfd_client);
+    }
+
   /* Needs to protect against recursion. */
   if (self->server)
     {
@@ -632,6 +648,9 @@ static void
 nd_wfd_p2p_sink_sink_stop_stream (NdSink *sink)
 {
   NdWFDP2PSink *self = ND_WFD_P2P_SINK (sink);
+
+  if (self->state == ND_SINK_STATE_DISCONNECTED)
+    return;
 
   nd_wfd_p2p_sink_sink_stop_stream_int (self);
 
