@@ -1,3 +1,9 @@
+GNOME Network Displays 0.99.0
+=============================
+* wfd: Fix keep-alive and RTCP port handling for Roku/Hisense sinks (@christophermarek)
+* sink-row: Add adw_preferences_row_set_use_markup (@lorbus)
+* fix a couple of memory leaks and a use-after-free crash
+
 GNOME Network Displays 0.98.0
 =============================
 * Add a dbus daemon program (@pesader)
