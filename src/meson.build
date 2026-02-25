@@ -138,7 +138,7 @@ if build_daemon
 endif
 
 if build_app
-  executable('gnome-network-displays',
+  executable('desktopcast',
     gnome_nd_app_sources,
     dependencies: gnome_nd_app_deps,
     install: true,

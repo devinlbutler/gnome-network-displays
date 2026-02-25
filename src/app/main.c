@@ -72,9 +72,9 @@ main (int   argc,
   gst_init (&argc, &argv);
 
 #if GLIB_CHECK_VERSION (2, 74, 0)
-  app = gtk_application_new ("org.gnome.NetworkDisplays", G_APPLICATION_DEFAULT_FLAGS);
+  app = gtk_application_new ("com.desktopcast.DesktopCast", G_APPLICATION_DEFAULT_FLAGS);
 #else
-  app = gtk_application_new ("org.gnome.NetworkDisplays", G_APPLICATION_FLAGS_NONE);
+  app = gtk_application_new ("com.desktopcast.DesktopCast", G_APPLICATION_FLAGS_NONE);
 #endif
 
   g_set_application_name (_("desktopCast"));

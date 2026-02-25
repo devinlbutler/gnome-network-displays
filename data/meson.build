@@ -2,8 +2,8 @@ if build_app
   subdir('icons')
 
   desktop_file = i18n.merge_file(
-    input: 'org.gnome.NetworkDisplays.desktop.in',
-    output: 'org.gnome.NetworkDisplays.desktop',
+    input: 'com.desktopcast.DesktopCast.desktop.in',
+    output: 'com.desktopcast.DesktopCast.desktop',
     type: 'desktop',
     po_dir: '../po',
     install: true,
@@ -18,8 +18,8 @@ if build_app
   endif
 
   appstream_file = i18n.merge_file(
-    input: 'org.gnome.NetworkDisplays.metainfo.xml.in',
-    output: 'org.gnome.NetworkDisplays.metainfo.xml',
+    input: 'com.desktopcast.DesktopCast.metainfo.xml.in',
+    output: 'com.desktopcast.DesktopCast.metainfo.xml',
     po_dir: '../po',
     install: true,
     install_dir: join_paths(get_option('datadir'), 'metainfo')

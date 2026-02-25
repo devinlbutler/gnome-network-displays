@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+	<id>com.desktopcast.DesktopCast.desktop</id>
+	<metadata_license>CC0-1.0</metadata_license>
+	<project_license>GPL-3.0-or-later</project_license>
+	<name>desktopCast</name>
+	<summary>Cast your screen to a TV via Wi-Fi Direct</summary>
+	<developer id="com.desktopcast">
+		<name translatable="no">desktopCast</name>
+	</developer>
+	<translation type="gettext">gnome-network-displays</translation>
+	<launchable type="desktop-id">com.desktopcast.DesktopCast.desktop</launchable>
+	<description>
+		<p>
+		desktopCast lets you wirelessly cast your screen to a TV or display.
+		Runs as a system tray icon. Supports the Miracast (WFD) and Chromecast protocols.
+		Seamlessly switch which screen you're sharing without dropping the connection.
+		</p>
+	</description>
+	<content_rating type="oars-1.1"/>
+	<releases>
+		<release version="0.99.0" date="2026-02-25"/>
+	</releases>
+</component>
