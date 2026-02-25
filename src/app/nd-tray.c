@@ -28,6 +28,7 @@
 #define MENU_ID_SELECT_SCREEN 5
 #define MENU_ID_DEBUG_TOGGLE  6
 #define MENU_ID_SAVE_LOG      7
+#define MENU_ID_MUTE_TOGGLE   8
 #define MENU_ID_SEPARATOR_1   90
 #define MENU_ID_SEPARATOR_2   91
 #define MENU_ID_SINK_BASE     100
@@ -313,6 +314,12 @@ build_menu_layout (NdTray *self)
       add_menu_item (&children, MENU_ID_CANCEL, "Cancel", TRUE);
     }
 
+  /* Mute toggle */
+  if (nd_controller_get_muted (self->controller))
+    add_menu_item (&children, MENU_ID_MUTE_TOGGLE, "Unmute Audio", TRUE);
+  else
+    add_menu_item (&children, MENU_ID_MUTE_TOGGLE, "Mute Audio", TRUE);
+
   /* Separator + Debug + Quit */
   add_separator (&children, MENU_ID_SEPARATOR_2);
 
@@ -387,6 +394,12 @@ dbusmenu_method_call (GDBusConnection       *connection,
                 case MENU_ID_SELECT_SCREEN:
                   /* Hot-swap: select_screen handles both streaming and idle cases */
                   nd_controller_select_screen (self->controller);
+                  break;
+
+                case MENU_ID_MUTE_TOGGLE:
+                  nd_controller_set_muted (self->controller,
+                                           !nd_controller_get_muted (self->controller));
+                  notify_layout_updated (self);
                   break;
 
                 case MENU_ID_DEBUG_TOGGLE:

@@ -104,9 +104,19 @@ cc_media_factory_create_video_element (CcMediaFactory *self)
       gst_preset_load_preset (GST_PRESET (encoder), "Zero Latency");
       gst_preset_load_preset (GST_PRESET (encoder), "Profile High");
       g_object_set (encoder,
-                    "ref", (guint) 5,
-                    "speed-preset", (guint) 1,
-                    "tune", 0x00000004,
+                    "bitrate", (guint) 4000,         /* 4 Mbps — good for 1080p over wifi */
+                    "vbv-buf-capacity", (guint) 2000, /* 2s VBV buffer — prevents underflow */
+                    "pass", (guint) 4,               /* constant bitrate */
+                    "ref", (guint) 1,                /* 1 ref frame — fast decode */
+                    "speed-preset", (guint) 1,       /* ultrafast */
+                    "tune", 0x00000004,              /* zero latency */
+                    "rc-lookahead", (gint) 0,
+                    "sync-lookahead", (gint) 0,
+                    "b-adapt", FALSE,
+                    "bframes", (guint) 0,
+                    "sliced-threads", FALSE,
+                    "threads", (guint) 2,
+                    "key-int-max", (guint) 60,       /* keyframe every 2s at 30fps */
                     NULL);
 
       parser = gst_element_factory_make ("h264parse", "cc-h264parse");

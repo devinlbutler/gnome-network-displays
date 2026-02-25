@@ -63,6 +63,9 @@ struct _NdController
   NdSinkListModel      *sink_list_model;
 
   gchar                *screen_name;
+
+  gboolean              audio_muted;
+  GstElement           *audio_source;  /* live pulsesrc, for mute toggling */
 };
 
 enum {
@@ -262,6 +265,14 @@ sink_create_audio_source_cb (NdController *self, NdSink *sink)
 
   res = nd_pulseaudio_get_source (self->pulse);
 
+  /* Store reference for live mute toggling */
+  g_clear_object (&self->audio_source);
+  self->audio_source = g_object_ref (res);
+
+  /* Apply current mute state */
+  g_object_set (res, "mute", self->audio_muted, NULL);
+  g_debug ("NdController: Audio source created (muted=%d)", self->audio_muted);
+
   return g_object_ref_sink (res);
 }
 
@@ -281,6 +292,9 @@ sink_notify_state_cb (NdController *self, GParamSpec *pspec, NdSink *sink)
       g_object_set (self->meta_provider, "discover", TRUE, NULL);
       g_signal_handlers_disconnect_by_data (self->stream_sink, self);
       g_clear_object (&self->stream_sink);
+
+      /* Release audio source reference */
+      g_clear_object (&self->audio_source);
 
       /* Stop capture pipeline */
       if (self->capture_pipeline)
@@ -623,6 +637,7 @@ nd_controller_finalize (GObject *obj)
     nd_pulseaudio_unload (self->pulse);
   g_clear_object (&self->pulse);
 
+  g_clear_object (&self->audio_source);
   g_clear_object (&self->stream_sink);
   g_clear_pointer (&self->screen_name, g_free);
 
@@ -841,4 +856,28 @@ nd_controller_get_screen_name (NdController *self)
   g_return_val_if_fail (ND_IS_CONTROLLER (self), NULL);
 
   return self->screen_name;
+}
+
+void
+nd_controller_set_muted (NdController *self, gboolean muted)
+{
+  g_return_if_fail (ND_IS_CONTROLLER (self));
+
+  self->audio_muted = muted;
+
+  /* Apply to live audio source if streaming */
+  if (self->audio_source)
+    g_object_set (self->audio_source, "mute", muted, NULL);
+
+  g_debug ("NdController: Audio %s (live=%s)",
+           muted ? "muted" : "unmuted",
+           self->audio_source ? "yes" : "no");
+}
+
+gboolean
+nd_controller_get_muted (NdController *self)
+{
+  g_return_val_if_fail (ND_IS_CONTROLLER (self), FALSE);
+
+  return self->audio_muted;
 }

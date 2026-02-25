@@ -77,6 +77,25 @@ main (int   argc,
   /* Initialize debug log capture (before anything else logs) */
   nd_debug_log_init ();
 
+  /* Enable debug mode via env var or --debug flag */
+  if (g_strcmp0 (g_getenv ("DESKTOPCAST_DEBUG"), "1") == 0)
+    nd_debug_log_set_verbose (TRUE);
+
+  /* Strip --debug from argv so GApplication doesn't reject it */
+  {
+    int j = 1;
+    for (int i = 1; i < argc; i++)
+      {
+        if (g_strcmp0 (argv[i], "--debug") == 0)
+          {
+            nd_debug_log_set_verbose (TRUE);
+            continue;
+          }
+        argv[j++] = argv[i];
+      }
+    argc = j;
+  }
+
 #if GLIB_CHECK_VERSION (2, 74, 0)
   app = gtk_application_new ("com.desktopcast.DesktopCast", G_APPLICATION_DEFAULT_FLAGS);
 #else
