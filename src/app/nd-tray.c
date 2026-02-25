@@ -28,7 +28,8 @@
 #define MENU_ID_SELECT_SCREEN 5
 #define MENU_ID_DEBUG_TOGGLE  6
 #define MENU_ID_SAVE_LOG      7
-#define MENU_ID_SEPARATOR     99
+#define MENU_ID_SEPARATOR_1   90
+#define MENU_ID_SEPARATOR_2   91
 #define MENU_ID_SINK_BASE     100
 
 /* StatusNotifierItem D-Bus interface */
@@ -248,7 +249,7 @@ build_menu_layout (NdTray *self)
           add_menu_item (&children, 10, sharing_label, FALSE);
           add_menu_item (&children, MENU_ID_SELECT_SCREEN, "Change Screen", TRUE);
 
-          add_separator (&children, MENU_ID_SEPARATOR);
+          add_separator (&children, MENU_ID_SEPARATOR_1);
 
           guint n_sinks = nd_controller_get_n_sinks (self->controller);
           if (n_sinks == 0)
@@ -313,7 +314,7 @@ build_menu_layout (NdTray *self)
     }
 
   /* Separator + Debug + Quit */
-  add_separator (&children, MENU_ID_SEPARATOR);
+  add_separator (&children, MENU_ID_SEPARATOR_2);
 
   if (nd_debug_log_get_verbose ())
     add_menu_item (&children, MENU_ID_DEBUG_TOGGLE, "Disable Debug Mode", TRUE);

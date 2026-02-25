@@ -1,8 +1,10 @@
 /* nd-debug-log.c
  *
  * Debug logging system for desktopCast.
- * Captures GLib and GStreamer log messages into a ring buffer
+ * Captures GLib and GStreamer log messages into a circular buffer
  * that can be saved to a file for troubleshooting.
+ *
+ * Thread-safe: uses a fixed-size circular buffer with a mutex.
  */
 
 #include "nd-debug-log.h"
@@ -13,8 +15,11 @@
 
 #define MAX_LOG_LINES 5000
 
+/* Circular buffer */
 static GMutex    log_mutex;
-static GPtrArray *log_lines = NULL;
+static gchar    *log_ring[MAX_LOG_LINES];
+static guint     log_head = 0;   /* next write position */
+static guint     log_count = 0;  /* number of entries stored */
 static gboolean  verbose_mode = FALSE;
 
 static const gchar *
@@ -30,18 +35,17 @@ level_str (GLogLevelFlags level)
 }
 
 static void
-append_line (const gchar *line)
+append_line (gchar *line)
 {
   g_mutex_lock (&log_mutex);
 
-  if (log_lines->len >= MAX_LOG_LINES)
-    {
-      gchar *old = g_ptr_array_index (log_lines, 0);
-      g_free (old);
-      g_ptr_array_remove_index (log_lines, 0);
-    }
+  /* Free old entry if overwriting */
+  g_free (log_ring[log_head]);
+  log_ring[log_head] = line;  /* takes ownership */
 
-  g_ptr_array_add (log_lines, g_strdup (line));
+  log_head = (log_head + 1) % MAX_LOG_LINES;
+  if (log_count < MAX_LOG_LINES)
+    log_count++;
 
   g_mutex_unlock (&log_mutex);
 }
@@ -54,9 +58,6 @@ debug_log_writer (GLogLevelFlags   log_level,
 {
   const gchar *domain = NULL;
   const gchar *message = NULL;
-  g_autoptr(GDateTime) now = NULL;
-  g_autofree gchar *timestamp = NULL;
-  g_autofree gchar *line = NULL;
 
   for (gsize i = 0; i < n_fields; i++)
     {
@@ -71,29 +72,28 @@ debug_log_writer (GLogLevelFlags   log_level,
   if (!domain)
     domain = "app";
 
-  now = g_date_time_new_now_local ();
-  timestamp = g_date_time_format (now, "%H:%M:%S.%f");
-  /* Trim microseconds to milliseconds */
+  g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+  g_autofree gchar *timestamp = g_date_time_format (now, "%H:%M:%S.%f");
   if (timestamp && strlen (timestamp) > 12)
     timestamp[12] = '\0';
 
-  line = g_strdup_printf ("[%s] %s  %s: %s",
-                          timestamp,
-                          level_str (log_level),
-                          domain,
-                          message);
+  gchar *line = g_strdup_printf ("[%s] %s  %s: %s",
+                                 timestamp,
+                                 level_str (log_level),
+                                 domain,
+                                 message);
 
-  append_line (line);
-
-  /* In verbose mode, always print to stderr */
+  /* In verbose mode, print to stderr */
   if (verbose_mode)
-    {
-      g_printerr ("%s\n", line);
-      return G_LOG_WRITER_HANDLED;
-    }
+    g_printerr ("%s\n", line);
 
-  /* Otherwise use default handling */
-  return g_log_writer_default (log_level, fields, n_fields, user_data);
+  append_line (line);  /* takes ownership */
+
+  /* For errors/criticals, also use default handler so we get abort behavior */
+  if (log_level & (G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL))
+    return g_log_writer_default (log_level, fields, n_fields, user_data);
+
+  return G_LOG_WRITER_HANDLED;
 }
 
 static void
@@ -106,58 +106,51 @@ gst_debug_handler (GstDebugCategory *category,
                    GstDebugMessage  *msg,
                    gpointer          user_data)
 {
-  const gchar *cat_name;
-  const gchar *level_name;
-  g_autoptr(GDateTime) now = NULL;
-  g_autofree gchar *timestamp = NULL;
-  g_autofree gchar *log_line = NULL;
-
   /* In non-verbose mode, only capture warnings and above */
   if (!verbose_mode && level > GST_LEVEL_WARNING)
     return;
 
-  /* In verbose mode, capture up to GST_LEVEL_DEBUG (skip TRACE/LOG for sanity) */
-  if (verbose_mode && level > GST_LEVEL_DEBUG)
+  /* In verbose mode, capture up to FIXME level (INFO is too noisy for streaming) */
+  if (verbose_mode && level > GST_LEVEL_FIXME)
     return;
 
-  cat_name = gst_debug_category_get_name (category);
-  level_name = gst_debug_level_get_name (level);
+  const gchar *cat_name = gst_debug_category_get_name (category);
+  const gchar *level_name = gst_debug_level_get_name (level);
 
-  now = g_date_time_new_now_local ();
-  timestamp = g_date_time_format (now, "%H:%M:%S.%f");
+  g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+  g_autofree gchar *timestamp = g_date_time_format (now, "%H:%M:%S.%f");
   if (timestamp && strlen (timestamp) > 12)
     timestamp[12] = '\0';
 
-  log_line = g_strdup_printf ("[%s] GST%-5s %s:%d:%s: %s",
-                              timestamp,
-                              level_name,
-                              cat_name,
-                              line,
-                              function,
-                              gst_debug_message_get (msg));
-
-  append_line (log_line);
+  gchar *log_line = g_strdup_printf ("[%s] GST:%-5s %s:%d:%s: %s",
+                                     timestamp,
+                                     level_name,
+                                     cat_name,
+                                     line,
+                                     function,
+                                     gst_debug_message_get (msg));
 
   if (verbose_mode)
     g_printerr ("%s\n", log_line);
+
+  append_line (log_line);  /* takes ownership */
 }
 
 void
 nd_debug_log_init (void)
 {
   g_mutex_init (&log_mutex);
-  log_lines = g_ptr_array_new_with_free_func (g_free);
+  memset (log_ring, 0, sizeof (log_ring));
 
   /* Install our GLib log writer */
   g_log_set_writer_func (debug_log_writer, NULL, NULL);
 
-  /* Install GStreamer debug handler */
+  /* Install GStreamer debug handler and suppress default output */
   gst_debug_add_log_function (gst_debug_handler, NULL, NULL);
-
-  /* Ensure GStreamer has at least WARNING level enabled */
+  gst_debug_remove_log_function (gst_debug_log_default);
   gst_debug_set_default_threshold (GST_LEVEL_WARNING);
 
-  append_line ("=== desktopCast debug log started ===");
+  append_line (g_strdup ("=== desktopCast debug log started ==="));
 }
 
 void
@@ -167,21 +160,17 @@ nd_debug_log_set_verbose (gboolean enabled)
 
   if (enabled)
     {
-      /* Crank up GStreamer debug to capture connection details */
-      gst_debug_set_default_threshold (GST_LEVEL_DEBUG);
+      /* FIXME level captures warnings + fixme notes — good signal-to-noise */
+      gst_debug_set_default_threshold (GST_LEVEL_FIXME);
 
-      /* Enable all GLib debug messages */
-      g_setenv ("G_MESSAGES_DEBUG", "all", TRUE);
-
-      append_line (">>> DEBUG MODE ENABLED <<<");
+      append_line (g_strdup (">>> DEBUG MODE ENABLED <<<"));
       g_message ("Debug mode enabled — verbose logging active");
     }
   else
     {
       gst_debug_set_default_threshold (GST_LEVEL_WARNING);
-      g_unsetenv ("G_MESSAGES_DEBUG");
 
-      append_line (">>> DEBUG MODE DISABLED <<<");
+      append_line (g_strdup (">>> DEBUG MODE DISABLED <<<"));
       g_message ("Debug mode disabled");
     }
 }
@@ -220,15 +209,21 @@ nd_debug_log_save (void)
   g_string_append_printf (dump, "Debug mode: %s\n", verbose_mode ? "ON" : "OFF");
   g_string_append (dump, "---\n\n");
 
-  /* Log entries */
+  /* Log entries — read from circular buffer in order */
   g_mutex_lock (&log_mutex);
 
-  for (guint i = 0; i < log_lines->len; i++)
+  guint start = (log_count < MAX_LOG_LINES) ? 0 : log_head;
+  for (guint i = 0; i < log_count; i++)
     {
-      g_string_append (dump, g_ptr_array_index (log_lines, i));
-      g_string_append_c (dump, '\n');
+      guint idx = (start + i) % MAX_LOG_LINES;
+      if (log_ring[idx])
+        {
+          g_string_append (dump, log_ring[idx]);
+          g_string_append_c (dump, '\n');
+        }
     }
 
+  guint saved_count = log_count;
   g_mutex_unlock (&log_mutex);
 
   /* Write to file */
@@ -244,7 +239,7 @@ nd_debug_log_save (void)
       return NULL;
     }
 
-  g_message ("Debug log saved to %s (%u entries)", filename, log_lines->len);
+  g_message ("Debug log saved to %s (%u entries)", filename, saved_count);
 
   return g_strdup (filename);
 }
@@ -255,7 +250,11 @@ nd_debug_log_shutdown (void)
   gst_debug_remove_log_function (gst_debug_handler);
 
   g_mutex_lock (&log_mutex);
-  g_clear_pointer (&log_lines, g_ptr_array_unref);
+  for (guint i = 0; i < MAX_LOG_LINES; i++)
+    g_clear_pointer (&log_ring[i], g_free);
+  log_count = 0;
+  log_head = 0;
   g_mutex_unlock (&log_mutex);
+
   g_mutex_clear (&log_mutex);
 }
