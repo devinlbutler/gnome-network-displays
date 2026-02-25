@@ -19,14 +19,14 @@
 #pragma once
 
 #include <gio/gio.h>
+#include "nd-controller.h"
 
 G_BEGIN_DECLS
 
 typedef struct _NdTray NdTray;
 
-NdTray  *nd_tray_new           (GApplication *app);
-void     nd_tray_set_streaming (NdTray       *self,
-                                gboolean      streaming);
-void     nd_tray_destroy       (NdTray       *self);
+NdTray  *nd_tray_new     (GApplication *app,
+                           NdController *controller);
+void     nd_tray_destroy  (NdTray       *self);
 
 G_END_DECLS

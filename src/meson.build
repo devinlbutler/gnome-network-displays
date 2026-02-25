@@ -111,18 +111,10 @@ gnome_nd_stream_deps += gnome_nd_common_deps
 # App sources and dependencies
 gnome_nd_app_sources = [
   'app/main.c',
-  'app/nd-codec-install.c',
+  'app/nd-controller.c',
   'app/nd-sink-list-model.c',
-  'app/nd-sink-row.c',
   'app/nd-tray.c',
-  'app/nd-window.c',
 ]
-
-gnome_nd_app_sources += gnome.compile_resources(
-  'gnome-nd-resources',
-  'gnome-network-displays.gresource.xml',
-  c_name: 'gnome_screencast'
-)
 
 gnome_nd_app_sources += gnome_nd_common_sources
 

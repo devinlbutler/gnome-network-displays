@@ -17,7 +17,15 @@
  */
 
 #include "nd-tray.h"
+#include "nd-controller.h"
 #include <gio/gio.h>
+
+/* Menu item IDs */
+#define MENU_ID_DISCONNECT  2
+#define MENU_ID_QUIT        3
+#define MENU_ID_CANCEL      4
+#define MENU_ID_SEPARATOR   99
+#define MENU_ID_SINK_BASE   100
 
 /* StatusNotifierItem D-Bus interface */
 static const gchar sni_introspection_xml[] =
@@ -85,21 +93,66 @@ static const gchar dbusmenu_introspection_xml[] =
 
 struct _NdTray
 {
-  GApplication *app;
-  gboolean      streaming;
+  GApplication    *app;
+  NdController    *controller;
 
-  guint         sni_bus_name_id;
-  guint         sni_registration_id;
-  guint         dbusmenu_registration_id;
+  guint            sni_bus_name_id;
+  guint            sni_registration_id;
+  guint            dbusmenu_registration_id;
   GDBusConnection *connection;
 
-  GDBusNodeInfo *sni_node_info;
-  GDBusNodeInfo *dbusmenu_node_info;
+  GDBusNodeInfo   *sni_node_info;
+  GDBusNodeInfo   *dbusmenu_node_info;
 
-  guint         layout_revision;
+  guint            layout_revision;
+
+  /* Maps menu item id (gint, GINT_TO_POINTER) -> NdSink* (borrowed) */
+  GHashTable      *id_to_sink;
+  gint             next_sink_id;
 };
 
 static void nd_tray_register_with_watcher (NdTray *self);
+
+/* --- Helper: add a menu item to children builder --- */
+
+static void
+add_menu_item (GVariantBuilder *children,
+               gint             id,
+               const gchar     *label,
+               gboolean         enabled)
+{
+  GVariantBuilder item_props;
+  GVariantBuilder no_children;
+
+  g_variant_builder_init (&item_props, G_VARIANT_TYPE ("a{sv}"));
+  g_variant_builder_add (&item_props, "{sv}", "label",
+                         g_variant_new_string (label));
+  g_variant_builder_add (&item_props, "{sv}", "enabled",
+                         g_variant_new_boolean (enabled));
+
+  g_variant_builder_init (&no_children, G_VARIANT_TYPE ("av"));
+
+  g_variant_builder_add (children, "v",
+                         g_variant_new ("(ia{sv}av)", id,
+                                        &item_props, &no_children));
+}
+
+static void
+add_separator (GVariantBuilder *children, gint id)
+{
+  GVariantBuilder item_props;
+  GVariantBuilder no_children;
+
+  g_variant_builder_init (&item_props, G_VARIANT_TYPE ("a{sv}"));
+  g_variant_builder_add (&item_props, "{sv}", "type",
+                         g_variant_new_string ("separator"));
+
+  g_variant_builder_init (&no_children, G_VARIANT_TYPE ("av"));
+
+  g_variant_builder_add (children, "v",
+                         g_variant_new ("(ia{sv}av)", id,
+                                        &item_props, &no_children));
+}
 
 /* --- SNI interface --- */
 
@@ -113,27 +166,8 @@ sni_method_call (GDBusConnection       *connection,
                  GDBusMethodInvocation *invocation,
                  gpointer               user_data)
 {
-  NdTray *self = user_data;
-
-  if (g_strcmp0 (method_name, "Activate") == 0 ||
-      g_strcmp0 (method_name, "SecondaryActivate") == 0)
-    {
-      g_application_activate (self->app);
-      g_dbus_method_invocation_return_value (invocation, NULL);
-    }
-  else if (g_strcmp0 (method_name, "ContextMenu") == 0)
-    {
-      /* Context menu is handled via dbusmenu, just acknowledge */
-      g_dbus_method_invocation_return_value (invocation, NULL);
-    }
-  else
-    {
-      g_dbus_method_invocation_return_error (invocation,
-                                             G_DBUS_ERROR,
-                                             G_DBUS_ERROR_UNKNOWN_METHOD,
-                                             "Unknown method: %s",
-                                             method_name);
-    }
+  /* Left-click and right-click both just acknowledge — menu is shown via dbusmenu */
+  g_dbus_method_invocation_return_value (invocation, NULL);
 }
 
 static GVariant *
@@ -145,22 +179,20 @@ sni_get_property (GDBusConnection *connection,
                   GError         **error,
                   gpointer         user_data)
 {
-  NdTray *self = user_data;
-
   if (g_strcmp0 (property_name, "Category") == 0)
     return g_variant_new_string ("ApplicationStatus");
   if (g_strcmp0 (property_name, "Id") == 0)
-    return g_variant_new_string ("gnome-network-displays");
+    return g_variant_new_string ("desktopcast");
   if (g_strcmp0 (property_name, "Title") == 0)
-    return g_variant_new_string ("GNOME Network Displays");
+    return g_variant_new_string ("desktopCast");
   if (g_strcmp0 (property_name, "Status") == 0)
-    return g_variant_new_string (self->streaming ? "Active" : "Passive");
+    return g_variant_new_string ("Active");
   if (g_strcmp0 (property_name, "IconName") == 0)
-    return g_variant_new_string ("org.gnome.NetworkDisplays");
+    return g_variant_new_string ("screen-shared-symbolic");
   if (g_strcmp0 (property_name, "Menu") == 0)
     return g_variant_new_object_path ("/MenuBar");
   if (g_strcmp0 (property_name, "ItemIsMenu") == 0)
-    return g_variant_new_boolean (FALSE);
+    return g_variant_new_boolean (TRUE);
 
   g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY,
                "Unknown property: %s", property_name);
@@ -180,6 +212,7 @@ build_menu_layout (NdTray *self)
 {
   GVariantBuilder root_props;
   GVariantBuilder children;
+  NdSinkState state;
 
   g_variant_builder_init (&root_props, G_VARIANT_TYPE ("a{sv}"));
   g_variant_builder_add (&root_props, "{sv}", "children-display",
@@ -187,58 +220,82 @@ build_menu_layout (NdTray *self)
 
   g_variant_builder_init (&children, G_VARIANT_TYPE ("av"));
 
-  /* Item 1: Show Window */
-  {
-    GVariantBuilder item_props;
-    g_variant_builder_init (&item_props, G_VARIANT_TYPE ("a{sv}"));
-    g_variant_builder_add (&item_props, "{sv}", "label",
-                           g_variant_new_string ("Show Window"));
-    g_variant_builder_add (&item_props, "{sv}", "enabled",
-                           g_variant_new_boolean (TRUE));
+  /* Clear the id-to-sink mapping and rebuild */
+  g_hash_table_remove_all (self->id_to_sink);
+  self->next_sink_id = MENU_ID_SINK_BASE;
 
-    GVariantBuilder no_children;
-    g_variant_builder_init (&no_children, G_VARIANT_TYPE ("av"));
+  state = nd_controller_get_state (self->controller);
 
-    g_variant_builder_add (&children, "v",
-                           g_variant_new ("(ia{sv}av)", 1,
-                                          &item_props, &no_children));
-  }
+  if (state == ND_SINK_STATE_DISCONNECTED)
+    {
+      /* Idle: show list of discovered displays */
+      guint n_sinks = nd_controller_get_n_sinks (self->controller);
 
-  /* Item 2: Disconnect */
-  {
-    GVariantBuilder item_props;
-    g_variant_builder_init (&item_props, G_VARIANT_TYPE ("a{sv}"));
-    g_variant_builder_add (&item_props, "{sv}", "label",
-                           g_variant_new_string ("Disconnect"));
-    g_variant_builder_add (&item_props, "{sv}", "enabled",
-                           g_variant_new_boolean (self->streaming));
+      if (n_sinks == 0)
+        {
+          add_menu_item (&children, 10, "Searching for displays...", FALSE);
+        }
+      else
+        {
+          for (guint i = 0; i < n_sinks; i++)
+            {
+              NdSink *sink = nd_controller_get_sink (self->controller, i);
+              if (!sink)
+                continue;
 
-    GVariantBuilder no_children;
-    g_variant_builder_init (&no_children, G_VARIANT_TYPE ("av"));
+              gint id = self->next_sink_id++;
+              g_autofree gchar *display_name = NULL;
+              g_object_get (sink, "display-name", &display_name, NULL);
 
-    g_variant_builder_add (&children, "v",
-                           g_variant_new ("(ia{sv}av)", 2,
-                                          &item_props, &no_children));
-  }
+              const gchar *label = display_name ? display_name : "Unknown Display";
+              add_menu_item (&children, id, label, TRUE);
 
-  /* Item 3: Quit */
-  {
-    GVariantBuilder item_props;
-    g_variant_builder_init (&item_props, G_VARIANT_TYPE ("a{sv}"));
-    g_variant_builder_add (&item_props, "{sv}", "label",
-                           g_variant_new_string ("Quit"));
-    g_variant_builder_add (&item_props, "{sv}", "enabled",
-                           g_variant_new_boolean (TRUE));
+              g_hash_table_insert (self->id_to_sink,
+                                  GINT_TO_POINTER (id), sink);
+            }
+        }
+    }
+  else if (state == ND_SINK_STATE_ERROR)
+    {
+      /* Error state */
+      add_menu_item (&children, 10, "Connection error", FALSE);
+      add_menu_item (&children, MENU_ID_CANCEL, "Dismiss", TRUE);
+    }
+  else if (state == ND_SINK_STATE_STREAMING)
+    {
+      /* Streaming */
+      NdSink *stream_sink = nd_controller_get_stream_sink (self->controller);
+      g_autofree gchar *display_name = NULL;
+      g_autofree gchar *label = NULL;
 
-    GVariantBuilder no_children;
-    g_variant_builder_init (&no_children, G_VARIANT_TYPE ("av"));
+      if (stream_sink)
+        g_object_get (stream_sink, "display-name", &display_name, NULL);
 
-    g_variant_builder_add (&children, "v",
-                           g_variant_new ("(ia{sv}av)", 3,
-                                          &item_props, &no_children));
-  }
+      label = g_strdup_printf ("Streaming to %s",
+                               display_name ? display_name : "display");
+      add_menu_item (&children, 10, label, FALSE);
+      add_menu_item (&children, MENU_ID_DISCONNECT, "Disconnect", TRUE);
+    }
+  else
+    {
+      /* Connecting states (ENSURE_FIREWALL, WAIT_P2P, WAIT_SOCKET, WAIT_STREAMING) */
+      NdSink *stream_sink = nd_controller_get_stream_sink (self->controller);
+      g_autofree gchar *display_name = NULL;
+      g_autofree gchar *label = NULL;
 
-  /* Root: (u(ia{sv}av)) */
+      if (stream_sink)
+        g_object_get (stream_sink, "display-name", &display_name, NULL);
+
+      label = g_strdup_printf ("%s - Connecting...",
+                               display_name ? display_name : "Display");
+      add_menu_item (&children, 10, label, FALSE);
+      add_menu_item (&children, MENU_ID_CANCEL, "Cancel", TRUE);
+    }
+
+  /* Separator + Quit */
+  add_separator (&children, MENU_ID_SEPARATOR);
+  add_menu_item (&children, MENU_ID_QUIT, "Quit", TRUE);
+
   return g_variant_new ("(u(ia{sv}av))",
                         self->layout_revision,
                         0, &root_props, &children);
@@ -272,25 +329,33 @@ dbusmenu_method_call (GDBusConnection       *connection,
 
       if (g_strcmp0 (event_id, "clicked") == 0)
         {
-          switch (id)
+          if (id >= MENU_ID_SINK_BASE)
             {
-            case 1: /* Show Window */
-              g_application_activate (self->app);
-              break;
+              /* Sink clicked — look up from hash table */
+              NdSink *sink = g_hash_table_lookup (self->id_to_sink,
+                                                  GINT_TO_POINTER (id));
+              if (sink)
+                nd_controller_connect_sink (self->controller, sink);
+              else
+                g_warning ("NdTray: Unknown sink id %d", id);
+            }
+          else
+            {
+              switch (id)
+                {
+                case MENU_ID_DISCONNECT:
+                  nd_controller_disconnect (self->controller);
+                  break;
 
-            case 2: /* Disconnect */
-              {
-                GAction *action;
-                action = g_action_map_lookup_action (G_ACTION_MAP (self->app),
-                                                     "disconnect");
-                if (action)
-                  g_action_activate (action, NULL);
-              }
-              break;
+                case MENU_ID_QUIT:
+                  nd_controller_disconnect (self->controller);
+                  g_application_quit (self->app);
+                  break;
 
-            case 3: /* Quit */
-              g_application_quit (self->app);
-              break;
+                case MENU_ID_CANCEL:
+                  nd_controller_disconnect (self->controller);
+                  break;
+                }
             }
         }
 
@@ -438,20 +503,67 @@ nd_tray_register_with_watcher (NdTray *self)
                           self);
 }
 
+/* --- Signal handlers from controller --- */
+
+static void
+notify_layout_updated (NdTray *self)
+{
+  self->layout_revision++;
+
+  if (!self->connection)
+    return;
+
+  g_dbus_connection_emit_signal (self->connection,
+                                 NULL,
+                                 "/MenuBar",
+                                 "com.canonical.dbusmenu",
+                                 "LayoutUpdated",
+                                 g_variant_new ("(ui)",
+                                                self->layout_revision, 0),
+                                 NULL);
+}
+
+static void
+on_sinks_changed (NdController *controller, NdTray *self)
+{
+  notify_layout_updated (self);
+}
+
+static void
+on_state_changed (NdController *controller, guint state, NdTray *self)
+{
+  notify_layout_updated (self);
+
+  if (!self->connection)
+    return;
+
+  /* Emit NewStatus on SNI */
+  g_dbus_connection_emit_signal (self->connection,
+                                 NULL,
+                                 "/StatusNotifierItem",
+                                 "org.kde.StatusNotifierItem",
+                                 "NewStatus",
+                                 g_variant_new ("(s)", "Active"),
+                                 NULL);
+}
+
 /* --- Public API --- */
 
 NdTray *
-nd_tray_new (GApplication *app)
+nd_tray_new (GApplication *app, NdController *controller)
 {
   NdTray *self;
   g_autofree gchar *bus_name = NULL;
 
   g_return_val_if_fail (G_IS_APPLICATION (app), NULL);
+  g_return_val_if_fail (ND_IS_CONTROLLER (controller), NULL);
 
   self = g_new0 (NdTray, 1);
   self->app = app;
-  self->streaming = FALSE;
+  self->controller = controller;
   self->layout_revision = 1;
+  self->next_sink_id = MENU_ID_SINK_BASE;
+  self->id_to_sink = g_hash_table_new (g_direct_hash, g_direct_equal);
 
   self->sni_node_info = g_dbus_node_info_new_for_xml (sni_introspection_xml, NULL);
   self->dbusmenu_node_info = g_dbus_node_info_new_for_xml (dbusmenu_introspection_xml, NULL);
@@ -459,9 +571,16 @@ nd_tray_new (GApplication *app)
   if (!self->sni_node_info || !self->dbusmenu_node_info)
     {
       g_warning ("NdTray: Failed to parse introspection XML");
+      g_hash_table_unref (self->id_to_sink);
       g_free (self);
       return NULL;
     }
+
+  /* Connect to controller signals */
+  g_signal_connect (controller, "sinks-changed",
+                    G_CALLBACK (on_sinks_changed), self);
+  g_signal_connect (controller, "state-changed",
+                    G_CALLBACK (on_state_changed), self);
 
   bus_name = g_strdup_printf ("org.kde.StatusNotifierItem-%d-1", getpid ());
 
@@ -479,46 +598,14 @@ nd_tray_new (GApplication *app)
 }
 
 void
-nd_tray_set_streaming (NdTray  *self,
-                       gboolean streaming)
-{
-  g_return_if_fail (self != NULL);
-
-  if (self->streaming == streaming)
-    return;
-
-  self->streaming = streaming;
-  self->layout_revision++;
-
-  if (!self->connection)
-    return;
-
-  /* Emit NewStatus signal on SNI */
-  g_dbus_connection_emit_signal (self->connection,
-                                 NULL,
-                                 "/StatusNotifierItem",
-                                 "org.kde.StatusNotifierItem",
-                                 "NewStatus",
-                                 g_variant_new ("(s)",
-                                                streaming ? "Active" : "Passive"),
-                                 NULL);
-
-  /* Emit LayoutUpdated signal on dbusmenu */
-  g_dbus_connection_emit_signal (self->connection,
-                                 NULL,
-                                 "/MenuBar",
-                                 "com.canonical.dbusmenu",
-                                 "LayoutUpdated",
-                                 g_variant_new ("(ui)",
-                                                self->layout_revision, 0),
-                                 NULL);
-}
-
-void
 nd_tray_destroy (NdTray *self)
 {
   if (self == NULL)
     return;
+
+  /* Disconnect controller signals */
+  if (self->controller)
+    g_signal_handlers_disconnect_by_data (self->controller, self);
 
   if (self->connection)
     {
@@ -535,6 +622,7 @@ nd_tray_destroy (NdTray *self)
 
   g_clear_pointer (&self->sni_node_info, g_dbus_node_info_unref);
   g_clear_pointer (&self->dbusmenu_node_info, g_dbus_node_info_unref);
+  g_clear_pointer (&self->id_to_sink, g_hash_table_unref);
 
   g_free (self);
 }
