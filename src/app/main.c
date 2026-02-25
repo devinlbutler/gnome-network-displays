@@ -21,24 +21,113 @@
 #include <gst/gst.h>
 #include "gnome-network-displays-config.h"
 #include "nd-window.h"
+#include "nd-tray.h"
+
+static NdTray *tray = NULL;
+
+static gboolean
+on_close_request (GtkWindow *window,
+                  gpointer   user_data)
+{
+  NdWindow *nd_window = ND_WINDOW (window);
+
+  if (nd_window_is_streaming (nd_window))
+    {
+      gtk_widget_set_visible (GTK_WIDGET (window), FALSE);
+      return TRUE;
+    }
+
+  return FALSE;
+}
 
 static void
 on_activate (AdwApplication *app)
 {
   GtkWindow *window;
 
-  /* It's good practice to check your parameters at the beginning of the
-   * function. It helps catch errors early and in development instead of
-   * by your users.
-   */
   g_assert (GTK_IS_APPLICATION (app));
+
+  /* If a window already exists, just show and present it */
+  window = gtk_application_get_active_window (GTK_APPLICATION (app));
+  if (window)
+    {
+      gtk_widget_set_visible (GTK_WIDGET (window), TRUE);
+      gtk_window_present (window);
+      return;
+    }
 
   window = g_object_new (ND_TYPE_WINDOW,
                          "application", app,
                          NULL);
 
-  /* Ask the window manager/compositor to present the window. */
+  g_signal_connect (window, "close-request",
+                    G_CALLBACK (on_close_request), NULL);
+
   gtk_window_present (window);
+}
+
+static void
+on_disconnect_activated (GSimpleAction *action,
+                         GVariant      *parameter,
+                         gpointer       user_data)
+{
+  GApplication *app = G_APPLICATION (user_data);
+  GtkWindow *window;
+
+  window = gtk_application_get_active_window (GTK_APPLICATION (app));
+  if (window)
+    {
+      NdSink *sink = nd_window_get_stream_sink (ND_WINDOW (window));
+      if (sink)
+        nd_sink_stop_stream (sink);
+    }
+}
+
+static void
+on_streaming_state_changed (GSimpleAction *action,
+                            GVariant      *value,
+                            gpointer       user_data)
+{
+  gboolean streaming = g_variant_get_boolean (value);
+
+  g_simple_action_set_state (action, value);
+  nd_tray_set_streaming (tray, streaming);
+}
+
+static void
+on_startup (GApplication *app)
+{
+  GSimpleAction *disconnect_action;
+  GSimpleAction *streaming_action;
+
+  /* Keep the application alive when the window is hidden */
+  g_application_hold (app);
+
+  /* Create the tray icon */
+  tray = nd_tray_new (app);
+
+  /* Register the disconnect action */
+  disconnect_action = g_simple_action_new ("disconnect", NULL);
+  g_signal_connect (disconnect_action, "activate",
+                    G_CALLBACK (on_disconnect_activated), app);
+  g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (disconnect_action));
+  g_object_unref (disconnect_action);
+
+  /* Register a stateful boolean action for streaming state bridge */
+  streaming_action = g_simple_action_new_stateful ("streaming-state",
+                                                    NULL,
+                                                    g_variant_new_boolean (FALSE));
+  g_signal_connect (streaming_action, "change-state",
+                    G_CALLBACK (on_streaming_state_changed), NULL);
+  g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (streaming_action));
+  g_object_unref (streaming_action);
+}
+
+static void
+on_shutdown (GApplication *app)
+{
+  nd_tray_destroy (tray);
+  tray = NULL;
 }
 
 int
@@ -54,11 +143,6 @@ main (int   argc,
 
   gst_init (&argc, &argv);
 
-  /*
-   * Create a new GtkApplication. The application manages our main loop,
-   * application windows, integration with the window manager/compositor, and
-   * desktop features such as file opening and single-instance applications.
-   */
 #if GLIB_CHECK_VERSION (2, 74, 0)
   app = adw_application_new ("org.gnome.NetworkDisplays", G_APPLICATION_DEFAULT_FLAGS);
 #else
@@ -67,26 +151,9 @@ main (int   argc,
 
   g_set_application_name (_("GNOME Network Displays"));
 
-  /*
-   * We connect to the activate signal to create a window when the application
-   * has been launched. Additionally, this signal notifies us when the user
-   * tries to launch a "second instance" of the application. When they try
-   * to do that, we'll just present any existing window.
-   *
-   * Because we can't pass a pointer to any function type, we have to cast
-   * our "on_activate" function to a GCallback.
-   */
+  g_signal_connect (app, "startup", G_CALLBACK (on_startup), NULL);
   g_signal_connect (app, "activate", G_CALLBACK (on_activate), NULL);
+  g_signal_connect (app, "shutdown", G_CALLBACK (on_shutdown), NULL);
 
-  /*
-   * Run the application. This function will block until the application
-   * exits. Upon return, we have our exit code to return to the shell. (This
-   * is the code you see when you do `echo $?` after running a command in a
-   * terminal.
-   *
-   * Since GtkApplication inherits from GApplication, we use the parent class
-   * method "run". But we need to cast, which is what the "G_APPLICATION()"
-   * macro does.
-   */
   return g_application_run (G_APPLICATION (app), argc, argv);
 }

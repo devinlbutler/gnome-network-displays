@@ -1,6 +1,6 @@
-/* nd-window.h
+/* nd-tray.h
  *
- * Copyright 2018 Benjamin Berg <bberg@redhat.com>
+ * Copyright 2024 GNOME Network Displays contributors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,15 +18,15 @@
 
 #pragma once
 
-#include <adwaita.h>
-#include "nd-sink.h"
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
-#define ND_TYPE_WINDOW (gnome_nd_window_get_type ())
-G_DECLARE_FINAL_TYPE (NdWindow, gnome_nd_window, ND, WINDOW, AdwApplicationWindow)
+typedef struct _NdTray NdTray;
 
-gboolean  nd_window_is_streaming     (NdWindow *self);
-NdSink   *nd_window_get_stream_sink  (NdWindow *self);
+NdTray  *nd_tray_new           (GApplication *app);
+void     nd_tray_set_streaming (NdTray       *self,
+                                gboolean      streaming);
+void     nd_tray_destroy       (NdTray       *self);
 
 G_END_DECLS

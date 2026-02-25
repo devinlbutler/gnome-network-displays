@@ -90,6 +90,27 @@ struct _NdWindow
 
 G_DEFINE_TYPE (NdWindow, gnome_nd_window, ADW_TYPE_APPLICATION_WINDOW)
 
+gboolean
+nd_window_is_streaming (NdWindow *self)
+{
+  NdSinkState state;
+
+  g_return_val_if_fail (ND_IS_WINDOW (self), FALSE);
+
+  if (!self->stream_sink)
+    return FALSE;
+
+  g_object_get (self->stream_sink, "state", &state, NULL);
+  return state == ND_SINK_STATE_STREAMING;
+}
+
+NdSink *
+nd_window_get_stream_sink (NdWindow *self)
+{
+  g_return_val_if_fail (ND_IS_WINDOW (self), NULL);
+  return self->stream_sink;
+}
+
 static GstElement *
 nd_window_screencast_get_source (NdWindow * self)
 {
@@ -296,6 +317,19 @@ sink_notify_state_cb (NdWindow *self, GParamSpec *pspec, NdSink *sink)
       g_clear_object (&self->stream_sink);
       break;
     }
+
+  /* Bridge streaming state to the app-level action for the tray icon */
+  {
+    GApplication *app = g_application_get_default ();
+    if (app)
+      {
+        GAction *action = g_action_map_lookup_action (G_ACTION_MAP (app),
+                                                      "streaming-state");
+        if (action)
+          g_simple_action_set_state (G_SIMPLE_ACTION (action),
+                                    g_variant_new_boolean (state == ND_SINK_STATE_STREAMING));
+      }
+  }
 }
 
 gboolean

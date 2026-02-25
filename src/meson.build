@@ -114,6 +114,7 @@ gnome_nd_app_sources = [
   'app/nd-codec-install.c',
   'app/nd-sink-list-model.c',
   'app/nd-sink-row.c',
+  'app/nd-tray.c',
   'app/nd-window.c',
 ]
 
