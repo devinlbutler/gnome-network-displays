@@ -307,7 +307,7 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
   success &= gst_bin_add (bin, queue_mpegmux_video);
   g_object_set (queue_mpegmux_video,
                 "max-size-buffers", (guint) 1000,
-                "max-size-time", 500 * GST_MSECOND,
+                "max-size-time", (guint64) 3000 * GST_MSECOND,
                 NULL);
 
   success &= gst_element_link_many (source,
@@ -390,7 +390,7 @@ wfd_media_factory_create_audio_element (WfdMediaFactory *self)
   queue_mpegmux_audio = gst_element_factory_make ("queue", "wfd-mpegmux-audio-queue");
   g_object_set (queue_mpegmux_audio,
                 "max-size-buffers", (guint) 100000,
-                "max-size-time", 500 * GST_MSECOND,
+                "max-size-time", (guint64) 3000 * GST_MSECOND,
                 "leaky", 0,
                 NULL);
   success &= gst_bin_add (audio_pipeline, queue_mpegmux_audio);
@@ -501,10 +501,12 @@ wfd_media_factory_create_pipeline (GstRTSPMediaFactory *factory, GstRTSPMedia *m
 
   pipeline = GST_RTSP_MEDIA_FACTORY_CLASS (wfd_media_factory_parent_class)->create_pipeline (factory, media);
 
-  /* We need a high latency for the openh264 encoder at least when the
-   * usage-type is set to "screen". After e.g. scene changes the latency will
-   * be very high for short periods of time, and this prevents further issues. */
-  gst_pipeline_set_latency (GST_PIPELINE (pipeline), 500 * GST_MSECOND);
+  /* We need a high latency to accommodate the video encoder. The x264enc
+   * encoder in particular can report a minimum latency above 2 seconds,
+   * and the openh264 encoder can spike during scene changes. Setting the
+   * pipeline latency below the encoder's minimum causes the mpegtsmux
+   * aggregator to fail latency negotiation (min > max). */
+  gst_pipeline_set_latency (GST_PIPELINE (pipeline), 3000 * GST_MSECOND);
 
   return pipeline;
 }

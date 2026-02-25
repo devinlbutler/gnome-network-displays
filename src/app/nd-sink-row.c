@@ -39,7 +39,16 @@ static GParamSpec * props[PROP_LAST] = { NULL, };
 static void
 nd_sink_row_sync (NdSinkRow *self)
 {
+#if ADW_CHECK_VERSION(1, 6, 0)
   g_object_bind_property (self->sink, "display-name", self, "title", G_BINDING_SYNC_CREATE);
+#else
+  g_autofree gchar *display_name = NULL;
+  g_autofree gchar *escaped = NULL;
+
+  g_object_get (self->sink, "display-name", &display_name, NULL);
+  escaped = g_markup_escape_text (display_name ? display_name : "", -1);
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (self), escaped);
+#endif
 }
 
 static void
@@ -126,7 +135,9 @@ static void
 nd_sink_row_init (NdSinkRow *self)
 {
   gtk_list_box_row_set_activatable (GTK_LIST_BOX_ROW (self), TRUE);
+#if ADW_CHECK_VERSION(1, 6, 0)
   adw_preferences_row_set_use_markup (ADW_PREFERENCES_ROW (self), FALSE);
+#endif
 }
 
 /**

@@ -53,7 +53,7 @@ gnome_nd_common_deps = [
   dependency('libnm', version: '>= 1.15'),
   dependency('libportal-gtk4', version: '>= 0.7'),
   dependency('libpulse-mainloop-glib'),
-  dependency('libadwaita-1', version: '>= 1.6.0'),
+  dependency('libadwaita-1', version: '>= 1.4.0'),
 ]
 
 if get_option('systemd_resolved')

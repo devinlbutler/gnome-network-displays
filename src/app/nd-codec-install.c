@@ -117,7 +117,7 @@ nd_codec_install_update (NdCodecInstall *self)
 
   if (!self->codecs)
     {
-      g_warning ("codec list not initialized");
+      gtk_widget_set_visible (GTK_WIDGET (self), FALSE);
       return;
     }
 
