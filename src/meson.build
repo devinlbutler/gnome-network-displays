@@ -112,6 +112,7 @@ gnome_nd_stream_deps += gnome_nd_common_deps
 gnome_nd_app_sources = [
   'app/main.c',
   'app/nd-controller.c',
+  'app/nd-debug-log.c',
   'app/nd-sink-list-model.c',
   'app/nd-tray.c',
 ]

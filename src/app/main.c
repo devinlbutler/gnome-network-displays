@@ -21,6 +21,7 @@
 #include <gtk/gtk.h>
 #include "gnome-network-displays-config.h"
 #include "nd-controller.h"
+#include "nd-debug-log.h"
 #include "nd-tray.h"
 
 static NdTray       *tray = NULL;
@@ -56,6 +57,8 @@ on_shutdown (GApplication *app)
   tray = NULL;
 
   g_clear_object (&controller);
+
+  nd_debug_log_shutdown ();
 }
 
 int
@@ -70,6 +73,9 @@ main (int   argc,
   textdomain (GETTEXT_PACKAGE);
 
   gst_init (&argc, &argv);
+
+  /* Initialize debug log capture (before anything else logs) */
+  nd_debug_log_init ();
 
 #if GLIB_CHECK_VERSION (2, 74, 0)
   app = gtk_application_new ("com.desktopcast.DesktopCast", G_APPLICATION_DEFAULT_FLAGS);

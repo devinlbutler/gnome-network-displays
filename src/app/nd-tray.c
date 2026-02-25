@@ -18,6 +18,7 @@
 
 #include "nd-tray.h"
 #include "nd-controller.h"
+#include "nd-debug-log.h"
 #include <gio/gio.h>
 
 /* Menu item IDs */
@@ -25,6 +26,8 @@
 #define MENU_ID_QUIT          3
 #define MENU_ID_CANCEL        4
 #define MENU_ID_SELECT_SCREEN 5
+#define MENU_ID_DEBUG_TOGGLE  6
+#define MENU_ID_SAVE_LOG      7
 #define MENU_ID_SEPARATOR     99
 #define MENU_ID_SINK_BASE     100
 
@@ -113,6 +116,7 @@ struct _NdTray
 };
 
 static void nd_tray_register_with_watcher (NdTray *self);
+static void notify_layout_updated (NdTray *self);
 
 /* --- Helper: add a menu item to children builder --- */
 
@@ -308,8 +312,15 @@ build_menu_layout (NdTray *self)
       add_menu_item (&children, MENU_ID_CANCEL, "Cancel", TRUE);
     }
 
-  /* Separator + Quit */
+  /* Separator + Debug + Quit */
   add_separator (&children, MENU_ID_SEPARATOR);
+
+  if (nd_debug_log_get_verbose ())
+    add_menu_item (&children, MENU_ID_DEBUG_TOGGLE, "Disable Debug Mode", TRUE);
+  else
+    add_menu_item (&children, MENU_ID_DEBUG_TOGGLE, "Enable Debug Mode", TRUE);
+
+  add_menu_item (&children, MENU_ID_SAVE_LOG, "Save Debug Log", TRUE);
   add_menu_item (&children, MENU_ID_QUIT, "Quit", TRUE);
 
   return g_variant_new ("(u(ia{sv}av))",
@@ -375,6 +386,19 @@ dbusmenu_method_call (GDBusConnection       *connection,
                 case MENU_ID_SELECT_SCREEN:
                   /* Hot-swap: select_screen handles both streaming and idle cases */
                   nd_controller_select_screen (self->controller);
+                  break;
+
+                case MENU_ID_DEBUG_TOGGLE:
+                  nd_debug_log_set_verbose (!nd_debug_log_get_verbose ());
+                  notify_layout_updated (self);
+                  break;
+
+                case MENU_ID_SAVE_LOG:
+                  {
+                    g_autofree gchar *path = nd_debug_log_save ();
+                    if (path)
+                      g_message ("Debug log saved: %s", path);
+                  }
                   break;
                 }
             }
