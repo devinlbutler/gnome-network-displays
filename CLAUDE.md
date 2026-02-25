@@ -5,14 +5,12 @@
 After any code change, always:
 
 1. **Build**: `meson compile -C builddir`
-2. **Build Flatpak**: `flatpak-builder --force-clean flatpak-build com.desktopcast.DesktopCast.json`
-3. **Export bundle**: `flatpak build-export /tmp/desktopcast-repo flatpak-build && flatpak build-bundle /tmp/desktopcast-repo desktopcast.flatpak com.desktopcast.DesktopCast`
+2. **Build AppImage**: `./build-appimage.sh`
 
-The `desktopcast.flatpak` bundle must always be rebuilt and kept up to date before pushing.
+The `desktopCast-x86_64.AppImage` must always be rebuilt and kept up to date before pushing.
 
 ## App Identity
 
 - App ID: `com.desktopcast.DesktopCast`
 - Binary: `desktopcast`
-- Flatpak manifest: `com.desktopcast.DesktopCast.json`
-- Runtime: GNOME Platform 48 (Flathub)
+- AppImage build script: `build-appimage.sh`
