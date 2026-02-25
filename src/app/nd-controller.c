@@ -221,6 +221,13 @@ sink_notify_state_cb (NdController *self, GParamSpec *pspec, NdSink *sink)
       g_object_set (self->meta_provider, "discover", TRUE, NULL);
       g_signal_handlers_disconnect_by_data (self->stream_sink, self);
       g_clear_object (&self->stream_sink);
+
+      /* Close portal session so screen picker shows again on next connect */
+      if (self->session)
+        {
+          xdp_session_close (self->session);
+          g_clear_object (&self->session);
+        }
     }
 
   g_signal_emit (self, signals[SIGNAL_STATE_CHANGED], 0, (guint) state);
@@ -432,27 +439,13 @@ nd_controller_constructed (GObject *obj)
                     G_CALLBACK (sink_list_items_changed_cb),
                     self);
 
-  /* Initialize portal and eagerly create screencast session */
+  /* Initialize portal object only — session created on-demand when user connects */
   self->portal = xdp_portal_initable_new (&error);
   if (error)
     {
       g_warning ("Failed to create screencast portal: %s", error->message);
       self->use_x11 = TRUE;
       g_clear_object (&self->portal);
-    }
-
-  if (self->portal)
-    {
-      xdp_portal_create_screencast_session (self->portal,
-                                            XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL,
-                                            XDP_SCREENCAST_FLAG_NONE,
-                                            XDP_CURSOR_MODE_EMBEDDED,
-                                            XDP_PERSIST_MODE_NONE,
-                                            NULL,
-                                            self->cancellable,
-                                            nd_screencast_init_cb,
-                                            self);
-      g_debug ("NdController: Creating portal session eagerly");
     }
 
   /* Initialize pulseaudio */
