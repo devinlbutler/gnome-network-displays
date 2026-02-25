@@ -21,11 +21,12 @@
 #include <gio/gio.h>
 
 /* Menu item IDs */
-#define MENU_ID_DISCONNECT  2
-#define MENU_ID_QUIT        3
-#define MENU_ID_CANCEL      4
-#define MENU_ID_SEPARATOR   99
-#define MENU_ID_SINK_BASE   100
+#define MENU_ID_DISCONNECT    2
+#define MENU_ID_QUIT          3
+#define MENU_ID_CANCEL        4
+#define MENU_ID_SELECT_SCREEN 5
+#define MENU_ID_SEPARATOR     99
+#define MENU_ID_SINK_BASE     100
 
 /* StatusNotifierItem D-Bus interface */
 static const gchar sni_introspection_xml[] =
@@ -228,42 +229,56 @@ build_menu_layout (NdTray *self)
 
   if (state == ND_SINK_STATE_DISCONNECTED)
     {
-      /* Idle: show list of discovered displays */
-      guint n_sinks = nd_controller_get_n_sinks (self->controller);
-
-      if (n_sinks == 0)
+      if (!nd_controller_has_screen (self->controller))
         {
-          add_menu_item (&children, 10, "Searching for displays...", FALSE);
+          /* No screen selected — show "Select Screen to Share" */
+          add_menu_item (&children, MENU_ID_SELECT_SCREEN,
+                         "Select Screen to Share", TRUE);
         }
       else
         {
-          for (guint i = 0; i < n_sinks; i++)
+          /* Screen selected, idle — show screen name + TV list */
+          const gchar *screen_name = nd_controller_get_screen_name (self->controller);
+          g_autofree gchar *sharing_label = g_strdup_printf ("Sharing: %s",
+                                                              screen_name ? screen_name : "Screen");
+          add_menu_item (&children, 10, sharing_label, FALSE);
+          add_menu_item (&children, MENU_ID_SELECT_SCREEN, "Change Screen", TRUE);
+
+          add_separator (&children, MENU_ID_SEPARATOR);
+
+          guint n_sinks = nd_controller_get_n_sinks (self->controller);
+          if (n_sinks == 0)
             {
-              NdSink *sink = nd_controller_get_sink (self->controller, i);
-              if (!sink)
-                continue;
+              add_menu_item (&children, 11, "Searching for displays...", FALSE);
+            }
+          else
+            {
+              for (guint i = 0; i < n_sinks; i++)
+                {
+                  NdSink *sink = nd_controller_get_sink (self->controller, i);
+                  if (!sink)
+                    continue;
 
-              gint id = self->next_sink_id++;
-              g_autofree gchar *display_name = NULL;
-              g_object_get (sink, "display-name", &display_name, NULL);
+                  gint id = self->next_sink_id++;
+                  g_autofree gchar *display_name = NULL;
+                  g_object_get (sink, "display-name", &display_name, NULL);
 
-              const gchar *label = display_name ? display_name : "Unknown Display";
-              add_menu_item (&children, id, label, TRUE);
+                  const gchar *label = display_name ? display_name : "Unknown Display";
+                  add_menu_item (&children, id, label, TRUE);
 
-              g_hash_table_insert (self->id_to_sink,
-                                  GINT_TO_POINTER (id), sink);
+                  g_hash_table_insert (self->id_to_sink,
+                                      GINT_TO_POINTER (id), sink);
+                }
             }
         }
     }
   else if (state == ND_SINK_STATE_ERROR)
     {
-      /* Error state */
       add_menu_item (&children, 10, "Connection error", FALSE);
       add_menu_item (&children, MENU_ID_CANCEL, "Dismiss", TRUE);
     }
   else if (state == ND_SINK_STATE_STREAMING)
     {
-      /* Streaming */
       NdSink *stream_sink = nd_controller_get_stream_sink (self->controller);
       g_autofree gchar *display_name = NULL;
       g_autofree gchar *label = NULL;
@@ -274,11 +289,12 @@ build_menu_layout (NdTray *self)
       label = g_strdup_printf ("Streaming to %s",
                                display_name ? display_name : "display");
       add_menu_item (&children, 10, label, FALSE);
+      add_menu_item (&children, MENU_ID_SELECT_SCREEN, "Change Screen", TRUE);
       add_menu_item (&children, MENU_ID_DISCONNECT, "Disconnect", TRUE);
     }
   else
     {
-      /* Connecting states (ENSURE_FIREWALL, WAIT_P2P, WAIT_SOCKET, WAIT_STREAMING) */
+      /* Connecting states */
       NdSink *stream_sink = nd_controller_get_stream_sink (self->controller);
       g_autofree gchar *display_name = NULL;
       g_autofree gchar *label = NULL;
@@ -286,8 +302,8 @@ build_menu_layout (NdTray *self)
       if (stream_sink)
         g_object_get (stream_sink, "display-name", &display_name, NULL);
 
-      label = g_strdup_printf ("%s - Connecting...",
-                               display_name ? display_name : "Display");
+      label = g_strdup_printf ("Connecting to %s...",
+                               display_name ? display_name : "display");
       add_menu_item (&children, 10, label, FALSE);
       add_menu_item (&children, MENU_ID_CANCEL, "Cancel", TRUE);
     }
@@ -354,6 +370,11 @@ dbusmenu_method_call (GDBusConnection       *connection,
 
                 case MENU_ID_CANCEL:
                   nd_controller_disconnect (self->controller);
+                  break;
+
+                case MENU_ID_SELECT_SCREEN:
+                  /* Hot-swap: select_screen handles both streaming and idle cases */
+                  nd_controller_select_screen (self->controller);
                   break;
                 }
             }
@@ -581,6 +602,8 @@ nd_tray_new (GApplication *app, NdController *controller)
                     G_CALLBACK (on_sinks_changed), self);
   g_signal_connect (controller, "state-changed",
                     G_CALLBACK (on_state_changed), self);
+  g_signal_connect (controller, "screen-changed",
+                    G_CALLBACK (on_sinks_changed), self);
 
   bus_name = g_strdup_printf ("org.kde.StatusNotifierItem-%d-1", getpid ());
 

@@ -40,4 +40,8 @@ gboolean      nd_controller_is_streaming (NdController *self);
 NdSinkState   nd_controller_get_state    (NdController *self);
 NdSink       *nd_controller_get_stream_sink (NdController *self);
 
+void          nd_controller_select_screen   (NdController *self);
+gboolean      nd_controller_has_screen      (NdController *self);
+const gchar  *nd_controller_get_screen_name (NdController *self);
+
 G_END_DECLS

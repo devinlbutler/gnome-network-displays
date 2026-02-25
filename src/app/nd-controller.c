@@ -47,6 +47,7 @@ struct _NdController
 
   XdpPortal            *portal;
   XdpSession           *session;
+  XdpSession           *new_session;       /* pending session during hot-swap */
   NdScreenCastSourceType screencast_type;
   gboolean              use_x11;
 
@@ -56,14 +57,18 @@ struct _NdController
 
   NdSink               *stream_sink;
   NdSinkState           current_state;
-  NdSink               *pending_sink;
+
+  GstElement           *capture_pipeline;  /* standalone: pipewiresrc → intervideosink */
 
   NdSinkListModel      *sink_list_model;
+
+  gchar                *screen_name;
 };
 
 enum {
   SIGNAL_SINKS_CHANGED,
   SIGNAL_STATE_CHANGED,
+  SIGNAL_SCREEN_CHANGED,
   N_SIGNALS,
 };
 
@@ -73,9 +78,10 @@ G_DEFINE_TYPE (NdController, nd_controller, G_TYPE_OBJECT)
 
 /* Forward declarations */
 static void start_streaming_to_sink (NdController *self, NdSink *sink);
+static void session_closed_cb (NdController *self);
 
 static GstElement *
-nd_controller_screencast_get_source (NdController *self)
+nd_controller_screencast_get_source (NdController *self, XdpSession *session)
 {
   g_autoptr(GVariant) stream_properties = NULL;
   GstElement *src = NULL;
@@ -84,10 +90,10 @@ nd_controller_screencast_get_source (NdController *self)
   guint32 node_id;
   guint32 screencast_type;
 
-  if (!self->session)
+  if (!session)
     g_error ("XDP session not found!");
 
-  streams = xdp_session_get_streams (self->session);
+  streams = xdp_session_get_streams (session);
   if (streams == NULL)
     g_error ("XDP session streams not found!");
 
@@ -116,7 +122,7 @@ nd_controller_screencast_get_source (NdController *self)
 
   g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
   g_object_set (src,
-                "fd", xdp_session_open_pipewire_remote (self->session),
+                "fd", xdp_session_open_pipewire_remote (session),
                 "path", path_str,
                 "do-timestamp", TRUE,
                 NULL);
@@ -126,34 +132,72 @@ nd_controller_screencast_get_source (NdController *self)
   return g_steal_pointer (&src);
 }
 
+static gchar *
+nd_controller_extract_screen_name (XdpSession *session)
+{
+  GVariant *streams = xdp_session_get_streams (session);
+  if (streams)
+    {
+      g_autoptr(GVariant) stream_properties = NULL;
+      GVariantIter iter;
+      guint32 node_id;
+      guint32 source_type = 0;
+
+      g_variant_iter_init (&iter, streams);
+      if (g_variant_iter_loop (&iter, "(u@a{sv})", &node_id, &stream_properties))
+        {
+          g_variant_lookup (stream_properties, "source_type", "u", &source_type);
+          switch (source_type)
+            {
+            case ND_SCREEN_CAST_SOURCE_TYPE_MONITOR:
+              return g_strdup ("Monitor");
+            case ND_SCREEN_CAST_SOURCE_TYPE_WINDOW:
+              return g_strdup ("Window");
+            case ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL:
+              return g_strdup ("Virtual Display");
+            default:
+              return g_strdup ("Screen");
+            }
+        }
+    }
+  return g_strdup ("Screen");
+}
+
 static GstElement *
-sink_create_source_cb (NdController *self, NdSink *sink)
+nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
 {
   g_autoptr(GstCaps) caps = NULL;
-  GstBin *bin;
-  GstElement *src, *filter, *dst, *res;
+  GstElement *pipeline, *src, *dst, *filter;
 
-  bin = GST_BIN (gst_bin_new ("screencast source bin"));
-  g_debug ("use x11: %d", self->use_x11);
+  pipeline = gst_pipeline_new ("capture-pipeline");
+
   if (self->use_x11)
     src = gst_element_factory_make ("ximagesrc", "X11 screencast source");
   else
-    src = nd_controller_screencast_get_source (self);
+    src = nd_controller_screencast_get_source (self, session);
 
   if (!src)
-    g_error ("Error creating video source element, likely a missing dependency!");
-
-  gst_bin_add (bin, src);
+    {
+      g_warning ("Error creating video source element for capture pipeline!");
+      gst_object_unref (pipeline);
+      return NULL;
+    }
 
   dst = gst_element_factory_make ("intervideosink", "inter video sink");
   if (!dst)
-    g_error ("Error creating intervideosink, missing dependency!");
+    {
+      g_warning ("Error creating intervideosink!");
+      gst_object_unref (src);
+      gst_object_unref (pipeline);
+      return NULL;
+    }
   g_object_set (dst,
                 "channel", "nd-inter-video",
                 "max-lateness", (gint64) - 1,
                 "sync", FALSE,
                 NULL);
-  gst_bin_add (bin, dst);
+
+  gst_bin_add_many (GST_BIN (pipeline), src, dst, NULL);
 
   if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
     {
@@ -163,16 +207,32 @@ sink_create_source_cb (NdController *self, NdSink *sink)
                                   "height", G_TYPE_INT, 1080,
                                   NULL);
       filter = gst_element_factory_make ("capsfilter", "srcfilter");
-      gst_bin_add (bin, filter);
-      g_object_set (filter,
-                    "caps", caps,
-                    NULL);
+      gst_bin_add (GST_BIN (pipeline), filter);
+      g_object_set (filter, "caps", caps, NULL);
       g_clear_pointer (&caps, gst_caps_unref);
 
       gst_element_link_many (src, filter, dst, NULL);
     }
   else
-    gst_element_link_many (src, dst, NULL);
+    {
+      gst_element_link_many (src, dst, NULL);
+    }
+
+  gst_element_set_state (pipeline, GST_STATE_PLAYING);
+
+  return pipeline;
+}
+
+static GstElement *
+sink_create_source_cb (NdController *self, NdSink *sink)
+{
+  GstBin *bin;
+  GstElement *res;
+
+  /* The capture pipeline (pipewiresrc → intervideosink) is already running
+   * as a standalone pipeline. We only need to return an intervideosrc that
+   * reads from the same "nd-inter-video" channel. */
+  bin = GST_BIN (gst_bin_new ("screencast source bin"));
 
   res = gst_element_factory_make ("intervideosrc", "screencastsrc");
   g_object_set (res,
@@ -222,12 +282,30 @@ sink_notify_state_cb (NdController *self, GParamSpec *pspec, NdSink *sink)
       g_signal_handlers_disconnect_by_data (self->stream_sink, self);
       g_clear_object (&self->stream_sink);
 
-      /* Close portal session so screen picker shows again on next connect */
+      /* Stop capture pipeline */
+      if (self->capture_pipeline)
+        {
+          gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
+          g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+        }
+
+      /* Close portal sessions — user must re-select screen */
+      if (self->new_session)
+        {
+          g_signal_handlers_disconnect_by_func (self->new_session,
+                                                session_closed_cb, self);
+          xdp_session_close (self->new_session);
+        }
+      g_clear_object (&self->new_session);
       if (self->session)
         {
+          g_signal_handlers_disconnect_by_func (self->session,
+                                                session_closed_cb, self);
           xdp_session_close (self->session);
-          g_clear_object (&self->session);
         }
+      g_clear_object (&self->session);
+      g_clear_pointer (&self->screen_name, g_free);
+      g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
     }
 
   g_signal_emit (self, signals[SIGNAL_STATE_CHANGED], 0, (guint) state);
@@ -241,6 +319,7 @@ nd_screencast_started_cb (GObject      *source_object,
   g_autoptr(GError) error = NULL;
   XdpSession *session = XDP_SESSION (source_object);
   NdController *self = ND_CONTROLLER (user_data);
+  gboolean is_swap = (session == self->new_session);
 
   if (!xdp_session_start_finish (session, result, &error))
     {
@@ -251,22 +330,82 @@ nd_screencast_started_cb (GObject      *source_object,
           if (g_error_matches (error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD))
             g_warning ("Screencasting portal is unavailable!");
 
-          g_warning ("Falling back to X11!");
-          self->use_x11 = TRUE;
+          if (!is_swap)
+            {
+              g_warning ("Falling back to X11!");
+              self->use_x11 = TRUE;
+            }
         }
 
       g_warning ("Failed to start screencast session: %s", error->message);
-      g_clear_object (&self->pending_sink);
+
+      if (is_swap)
+        {
+          /* Swap failed — discard new session, keep old capture running */
+          xdp_session_close (self->new_session);
+          g_clear_object (&self->new_session);
+          g_debug ("NdController: Screen swap cancelled/failed, keeping current screen");
+        }
+      else
+        {
+          g_clear_object (&self->session);
+          g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
+        }
       return;
     }
 
-  g_debug ("NdController: Screencast session started");
+  g_debug ("NdController: Screencast session started — screen selected (swap=%d)", is_swap);
 
-  /* If we have a pending sink, start streaming to it now */
-  if (self->pending_sink)
+  if (is_swap)
     {
-      NdSink *sink = g_steal_pointer (&self->pending_sink);
-      start_streaming_to_sink (self, sink);
+      /* Hot-swap: build new capture pipeline, stop old, swap sessions */
+      GstElement *new_capture = nd_controller_build_capture_pipeline (self, self->new_session);
+      if (!new_capture)
+        {
+          g_warning ("NdController: Failed to build new capture pipeline, keeping old");
+          xdp_session_close (self->new_session);
+          g_clear_object (&self->new_session);
+          return;
+        }
+
+      /* Stop old capture pipeline */
+      if (self->capture_pipeline)
+        {
+          gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
+          g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+        }
+
+      /* Disconnect "closed" signal from old session before closing it,
+       * otherwise session_closed_cb will tear down the RTSP stream. */
+      if (self->session)
+        {
+          g_signal_handlers_disconnect_by_func (self->session,
+                                                session_closed_cb, self);
+          xdp_session_close (self->session);
+        }
+      g_clear_object (&self->session);
+
+      self->session = g_steal_pointer (&self->new_session);
+      self->capture_pipeline = new_capture;
+
+      /* Update screen name */
+      g_clear_pointer (&self->screen_name, g_free);
+      self->screen_name = nd_controller_extract_screen_name (self->session);
+
+      g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
+    }
+  else
+    {
+      /* Initial screen selection — build and start capture pipeline */
+      g_clear_pointer (&self->screen_name, g_free);
+      self->screen_name = nd_controller_extract_screen_name (self->session);
+
+      /* Build capture pipeline */
+      self->capture_pipeline = nd_controller_build_capture_pipeline (self, self->session);
+      if (!self->capture_pipeline)
+        g_warning ("NdController: Failed to build capture pipeline!");
+
+      g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
     }
 }
 
@@ -287,24 +426,39 @@ nd_screencast_init_cb (GObject      *source_object,
 {
   g_autoptr(GError) error = NULL;
   NdController *self = ND_CONTROLLER (user_data);
+  XdpSession *new_session;
+  gboolean is_swap;
 
-  self->session = xdp_portal_create_screencast_session_finish (self->portal, result, &error);
-  if (self->session == NULL)
+  new_session = xdp_portal_create_screencast_session_finish (self->portal, result, &error);
+  if (new_session == NULL)
     {
       g_warning ("Failed to create screencast session: %s", error->message);
+      /* If this was a swap attempt, just keep old session running */
+      if (self->stream_sink)
+        {
+          g_debug ("NdController: Swap session creation failed, keeping current screen");
+          return;
+        }
       self->use_x11 = TRUE;
-      g_clear_object (&self->pending_sink);
       return;
     }
 
-  g_signal_connect_object (self->session,
+  /* Determine if this is a hot-swap (streaming) or initial selection */
+  is_swap = (self->stream_sink != NULL);
+
+  if (is_swap)
+    self->new_session = new_session;
+  else
+    self->session = new_session;
+
+  g_signal_connect_object (new_session,
                            "closed",
                            (GCallback) session_closed_cb,
                            self,
                            G_CONNECT_SWAPPED);
 
   /* Start session — NULL parent shows screen picker as floating dialog */
-  xdp_session_start (self->session, NULL, self->cancellable,
+  xdp_session_start (new_session, NULL, self->cancellable,
                      nd_screencast_started_cb, self);
 }
 
@@ -439,7 +593,7 @@ nd_controller_constructed (GObject *obj)
                     G_CALLBACK (sink_list_items_changed_cb),
                     self);
 
-  /* Initialize portal object only — session created on-demand when user connects */
+  /* Initialize portal (session created on-demand via nd_controller_select_screen) */
   self->portal = xdp_portal_initable_new (&error);
   if (error)
     {
@@ -469,11 +623,28 @@ nd_controller_finalize (GObject *obj)
     nd_pulseaudio_unload (self->pulse);
   g_clear_object (&self->pulse);
 
-  g_clear_object (&self->pending_sink);
   g_clear_object (&self->stream_sink);
+  g_clear_pointer (&self->screen_name, g_free);
 
+  if (self->capture_pipeline)
+    {
+      gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
+      g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+    }
+
+  if (self->new_session)
+    {
+      g_signal_handlers_disconnect_by_func (self->new_session,
+                                            session_closed_cb, self);
+      xdp_session_close (self->new_session);
+    }
+  g_clear_object (&self->new_session);
   if (self->session)
-    xdp_session_close (self->session);
+    {
+      g_signal_handlers_disconnect_by_func (self->session,
+                                            session_closed_cb, self);
+      xdp_session_close (self->session);
+    }
   g_clear_object (&self->session);
   g_clear_object (&self->portal);
 
@@ -511,6 +682,13 @@ nd_controller_class_init (NdControllerClass *klass)
                   G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL,
                   G_TYPE_NONE, 1, G_TYPE_UINT);
+
+  signals[SIGNAL_SCREEN_CHANGED] =
+    g_signal_new ("screen-changed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL,
+                  G_TYPE_NONE, 0);
 }
 
 static void
@@ -547,33 +725,15 @@ nd_controller_connect_sink (NdController *self, NdSink *sink)
   g_return_if_fail (ND_IS_CONTROLLER (self));
   g_return_if_fail (ND_IS_SINK (sink));
 
-  /* If already streaming, disconnect first */
   if (self->stream_sink)
     {
       g_warning ("NdController: Already streaming, disconnect first");
       return;
     }
 
-  /* If we need a portal session and don't have one, create it (deferred) */
-  if (!self->use_x11 && !self->portal)
+  if (!self->use_x11 && !self->session)
     {
-      g_warning ("NdController: Cannot start streaming — no portal available!");
-      return;
-    }
-
-  if (!self->use_x11 && self->portal && !self->session)
-    {
-      g_debug ("NdController: Creating portal session (deferred connect)");
-      self->pending_sink = g_object_ref (sink);
-      xdp_portal_create_screencast_session (self->portal,
-                                            XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL,
-                                            XDP_SCREENCAST_FLAG_NONE,
-                                            XDP_CURSOR_MODE_EMBEDDED,
-                                            XDP_PERSIST_MODE_NONE,
-                                            NULL,
-                                            self->cancellable,
-                                            nd_screencast_init_cb,
-                                            self);
+      g_warning ("NdController: No screen selected — call select_screen first");
       return;
     }
 
@@ -584,8 +744,6 @@ void
 nd_controller_disconnect (NdController *self)
 {
   g_return_if_fail (ND_IS_CONTROLLER (self));
-
-  g_clear_object (&self->pending_sink);
 
   if (self->stream_sink)
     nd_sink_stop_stream (self->stream_sink);
@@ -613,4 +771,74 @@ nd_controller_get_stream_sink (NdController *self)
   g_return_val_if_fail (ND_IS_CONTROLLER (self), NULL);
 
   return self->stream_sink;
+}
+
+void
+nd_controller_select_screen (NdController *self)
+{
+  g_return_if_fail (ND_IS_CONTROLLER (self));
+
+  if (!self->portal)
+    {
+      g_warning ("NdController: No portal available for screen selection");
+      return;
+    }
+
+  if (self->stream_sink)
+    {
+      /* Streaming — hot-swap: keep old session + capture alive,
+       * create a new session that will swap in on success */
+      g_debug ("NdController: Hot-swap screen selection while streaming");
+      /* Cancel any pending swap */
+      if (self->new_session)
+        {
+          g_signal_handlers_disconnect_by_func (self->new_session,
+                                                session_closed_cb, self);
+          xdp_session_close (self->new_session);
+          g_clear_object (&self->new_session);
+        }
+    }
+  else
+    {
+      /* Not streaming — close existing session and capture pipeline */
+      if (self->capture_pipeline)
+        {
+          gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
+          g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+        }
+      if (self->session)
+        {
+          g_signal_handlers_disconnect_by_func (self->session,
+                                                session_closed_cb, self);
+          xdp_session_close (self->session);
+          g_clear_object (&self->session);
+          g_clear_pointer (&self->screen_name, g_free);
+        }
+    }
+
+  xdp_portal_create_screencast_session (self->portal,
+                                        XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL,
+                                        XDP_SCREENCAST_FLAG_NONE,
+                                        XDP_CURSOR_MODE_EMBEDDED,
+                                        XDP_PERSIST_MODE_NONE,
+                                        NULL,
+                                        self->cancellable,
+                                        nd_screencast_init_cb,
+                                        self);
+}
+
+gboolean
+nd_controller_has_screen (NdController *self)
+{
+  g_return_val_if_fail (ND_IS_CONTROLLER (self), FALSE);
+
+  return self->session != NULL;
+}
+
+const gchar *
+nd_controller_get_screen_name (NdController *self)
+{
+  g_return_val_if_fail (ND_IS_CONTROLLER (self), NULL);
+
+  return self->screen_name;
 }
