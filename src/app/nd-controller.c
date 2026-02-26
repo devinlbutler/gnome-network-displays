@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <unistd.h>
 #include <glib/gi18n.h>
 #include <gst/base/base.h>
 #include <gst/gst.h>
@@ -64,6 +65,12 @@ struct _NdController
 
   gchar                *screen_name;
 
+  /* Saved PipeWire connection for virtual display retry */
+  gint                  pipewire_fd;       /* dup'd FD for PipeWire remote (-1 if none) */
+  guint32               pipewire_node_id;
+  guint                 capture_retry_count;
+  guint                 capture_retry_source_id;
+
   gboolean              audio_muted;
   GstElement           *audio_source;  /* live pulsesrc, for mute toggling */
 };
@@ -82,6 +89,10 @@ G_DEFINE_TYPE (NdController, nd_controller, G_TYPE_OBJECT)
 /* Forward declarations */
 static void start_streaming_to_sink (NdController *self, NdSink *sink);
 static void session_closed_cb (NdController *self);
+static gboolean retry_capture_pipeline (gpointer user_data);
+
+#define CAPTURE_RETRY_MAX     5
+#define CAPTURE_RETRY_MS   1000
 
 static GstElement *
 nd_controller_screencast_get_source (NdController *self, XdpSession *session)
@@ -123,9 +134,23 @@ nd_controller_screencast_get_source (NdController *self, XdpSession *session)
   if (src == NULL)
     g_error ("GStreamer element \"pipewiresrc\" could not be created!");
 
+  gint pw_fd = xdp_session_open_pipewire_remote (session);
+  g_debug ("NdController: PipeWire remote FD=%d for node %u", pw_fd, node_id);
+
+  /* For virtual displays, save a dup'd FD and node ID for retry if the
+   * PipeWire target isn't ready yet (Mutter needs time to create it). */
+  if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+    {
+      if (self->pipewire_fd >= 0)
+        close (self->pipewire_fd);
+      self->pipewire_fd = dup (pw_fd);
+      self->pipewire_node_id = node_id;
+      self->capture_retry_count = 0;
+    }
+
   g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
   g_object_set (src,
-                "fd", xdp_session_open_pipewire_remote (session),
+                "fd", pw_fd,
                 "path", path_str,
                 "do-timestamp", TRUE,
                 NULL);
@@ -205,7 +230,6 @@ nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
   if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
     {
       caps = gst_caps_new_simple ("video/x-raw",
-                                  "framerate", GST_TYPE_FRACTION, 30, 1,
                                   "width", G_TYPE_INT, 1920,
                                   "height", G_TYPE_INT, 1080,
                                   NULL);
@@ -224,6 +248,131 @@ nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
   gst_element_set_state (pipeline, GST_STATE_PLAYING);
 
   return pipeline;
+}
+
+/* Build a capture pipeline from saved PipeWire FD + node ID (for retry). */
+static GstElement *
+nd_controller_build_capture_pipeline_from_saved (NdController *self)
+{
+  g_autoptr(GstCaps) caps = NULL;
+  GstElement *pipeline, *src, *dst, *filter;
+
+  if (self->pipewire_fd < 0)
+    {
+      g_warning ("NdController: No saved PipeWire FD for retry");
+      return NULL;
+    }
+
+  pipeline = gst_pipeline_new ("capture-pipeline");
+
+  src = gst_element_factory_make ("pipewiresrc", "portal-pipewire-source");
+  if (!src)
+    {
+      g_warning ("NdController: Cannot create pipewiresrc for retry");
+      gst_object_unref (pipeline);
+      return NULL;
+    }
+
+  /* dup the saved FD so we keep a copy for further retries */
+  gint fd_for_src = dup (self->pipewire_fd);
+  g_autofree gchar *path_str = g_strdup_printf ("%u", self->pipewire_node_id);
+  g_debug ("NdController: Retry with FD=%d, path=%s", fd_for_src, path_str);
+  g_object_set (src,
+                "fd", fd_for_src,
+                "path", path_str,
+                "do-timestamp", TRUE,
+                NULL);
+  gst_base_src_set_live (GST_BASE_SRC (src), TRUE);
+
+  dst = gst_element_factory_make ("intervideosink", "inter video sink");
+  if (!dst)
+    {
+      gst_object_unref (src);
+      gst_object_unref (pipeline);
+      return NULL;
+    }
+  g_object_set (dst,
+                "channel", "nd-inter-video",
+                "max-lateness", (gint64) - 1,
+                "sync", FALSE,
+                NULL);
+
+  gst_bin_add_many (GST_BIN (pipeline), src, dst, NULL);
+
+  caps = gst_caps_new_simple ("video/x-raw",
+                              "width", G_TYPE_INT, 1920,
+                              "height", G_TYPE_INT, 1080,
+                              NULL);
+  filter = gst_element_factory_make ("capsfilter", "srcfilter");
+  gst_bin_add (GST_BIN (pipeline), filter);
+  g_object_set (filter, "caps", caps, NULL);
+  g_clear_pointer (&caps, gst_caps_unref);
+  gst_element_link_many (src, filter, dst, NULL);
+
+  gst_element_set_state (pipeline, GST_STATE_PLAYING);
+  return pipeline;
+}
+
+static gboolean
+capture_pipeline_bus_watch (GstBus *bus, GstMessage *msg, gpointer user_data)
+{
+  NdController *self = ND_CONTROLLER (user_data);
+
+  if (GST_MESSAGE_TYPE (msg) == GST_MESSAGE_ERROR)
+    {
+      g_autoptr(GError) err = NULL;
+      gst_message_parse_error (msg, &err, NULL);
+      g_debug ("NdController: Capture pipeline error: %s", err->message);
+
+      /* For virtual displays, schedule a retry if we haven't exceeded max */
+      if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL &&
+          self->capture_retry_count < CAPTURE_RETRY_MAX &&
+          self->pipewire_fd >= 0)
+        {
+          self->capture_retry_count++;
+          g_debug ("NdController: Scheduling capture pipeline retry %u/%d in %dms",
+                   self->capture_retry_count, CAPTURE_RETRY_MAX, CAPTURE_RETRY_MS);
+
+          /* Tear down the failed pipeline */
+          gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
+          g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+
+          self->capture_retry_source_id =
+            g_timeout_add (CAPTURE_RETRY_MS, retry_capture_pipeline, self);
+          return G_SOURCE_REMOVE;
+        }
+    }
+
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+nd_controller_watch_capture_pipeline (NdController *self)
+{
+  if (!self->capture_pipeline)
+    return;
+
+  GstBus *bus = gst_element_get_bus (self->capture_pipeline);
+  gst_bus_add_watch (bus, capture_pipeline_bus_watch, self);
+  gst_object_unref (bus);
+}
+
+static gboolean
+retry_capture_pipeline (gpointer user_data)
+{
+  NdController *self = ND_CONTROLLER (user_data);
+  self->capture_retry_source_id = 0;
+
+  g_debug ("NdController: Retrying capture pipeline (attempt %u/%d)",
+           self->capture_retry_count, CAPTURE_RETRY_MAX);
+
+  self->capture_pipeline = nd_controller_build_capture_pipeline_from_saved (self);
+  if (self->capture_pipeline)
+    nd_controller_watch_capture_pipeline (self);
+  else
+    g_warning ("NdController: Capture pipeline retry failed to build");
+
+  return G_SOURCE_REMOVE;
 }
 
 static GstElement *
@@ -684,6 +833,9 @@ nd_screencast_started_cb (GObject      *source_object,
       self->session = g_steal_pointer (&self->new_session);
       self->capture_pipeline = new_capture;
 
+      if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+        nd_controller_watch_capture_pipeline (self);
+
       /* Update screen name */
       g_clear_pointer (&self->screen_name, g_free);
       self->screen_name = nd_controller_extract_screen_name (self->session);
@@ -704,6 +856,9 @@ nd_screencast_started_cb (GObject      *source_object,
       self->capture_pipeline = nd_controller_build_capture_pipeline (self, self->session);
       if (!self->capture_pipeline)
         g_warning ("NdController: Failed to build capture pipeline!");
+
+      if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+        nd_controller_watch_capture_pipeline (self);
 
       /* Reposition virtual display above physical monitors */
       if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
@@ -944,10 +1099,19 @@ nd_controller_finalize (GObject *obj)
   g_clear_object (&self->stream_sink);
   g_clear_pointer (&self->screen_name, g_free);
 
+  if (self->capture_retry_source_id)
+    g_source_remove (self->capture_retry_source_id);
+
   if (self->capture_pipeline)
     {
       gst_element_set_state (self->capture_pipeline, GST_STATE_NULL);
       g_clear_pointer (&self->capture_pipeline, gst_object_unref);
+    }
+
+  if (self->pipewire_fd >= 0)
+    {
+      close (self->pipewire_fd);
+      self->pipewire_fd = -1;
     }
 
   if (self->new_session)
@@ -1013,6 +1177,7 @@ static void
 nd_controller_init (NdController *self)
 {
   self->current_state = ND_SINK_STATE_DISCONNECTED;
+  self->pipewire_fd = -1;
 }
 
 NdController *
