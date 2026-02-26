@@ -49,3 +49,11 @@ echo "Creating AppImage..."
 echo ""
 echo "Done! AppImage: desktopCast-x86_64.AppImage"
 ls -lh desktopCast-x86_64.AppImage
+
+# Deploy to ~/AppImages if --deploy flag is passed
+if [[ "$1" == "--deploy" ]]; then
+    echo "Deploying to ~/AppImages/..."
+    cp desktopCast-x86_64.AppImage ~/AppImages/
+    echo "Deployed: ~/AppImages/desktopCast-x86_64.AppImage"
+    ls -lh ~/AppImages/desktopCast-x86_64.AppImage
+fi

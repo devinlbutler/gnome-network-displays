@@ -90,9 +90,11 @@ G_DEFINE_TYPE (NdController, nd_controller, G_TYPE_OBJECT)
 static void start_streaming_to_sink (NdController *self, NdSink *sink);
 static void session_closed_cb (NdController *self);
 static gboolean retry_capture_pipeline (gpointer user_data);
+static void nd_controller_watch_capture_pipeline (NdController *self);
 
 #define CAPTURE_RETRY_MAX     5
 #define CAPTURE_RETRY_MS   1000
+#define VIRTUAL_START_DELAY_MS 2000
 
 static GstElement *
 nd_controller_screencast_get_source (NdController *self, XdpSession *session)
@@ -135,10 +137,10 @@ nd_controller_screencast_get_source (NdController *self, XdpSession *session)
     g_error ("GStreamer element \"pipewiresrc\" could not be created!");
 
   gint pw_fd = xdp_session_open_pipewire_remote (session);
-  g_debug ("NdController: PipeWire remote FD=%d for node %u", pw_fd, node_id);
+  g_debug ("NdController: PipeWire remote FD=%d for node %u (type=%u)",
+           pw_fd, node_id, self->screencast_type);
 
-  /* For virtual displays, save a dup'd FD and node ID for retry if the
-   * PipeWire target isn't ready yet (Mutter needs time to create it). */
+  /* For virtual displays, save a dup'd FD and node ID for delayed start / retry */
   if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
     {
       if (self->pipewire_fd >= 0)
@@ -148,12 +150,25 @@ nd_controller_screencast_get_source (NdController *self, XdpSession *session)
       self->capture_retry_count = 0;
     }
 
-  g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
-  g_object_set (src,
-                "fd", pw_fd,
-                "path", path_str,
-                "do-timestamp", TRUE,
-                NULL);
+  if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+    {
+      /* For virtual displays, don't set path — let pipewiresrc auto-connect
+       * through the portal FD, which only exposes the virtual display node */
+      g_debug ("NdController: Virtual display — using portal FD auto-connect (no path)");
+      g_object_set (src,
+                    "fd", pw_fd,
+                    "do-timestamp", TRUE,
+                    NULL);
+    }
+  else
+    {
+      g_autofree gchar *path_str = g_strdup_printf ("%u", node_id);
+      g_object_set (src,
+                    "fd", pw_fd,
+                    "path", path_str,
+                    "do-timestamp", TRUE,
+                    NULL);
+    }
 
   gst_base_src_set_live (GST_BASE_SRC (src), TRUE);
 
@@ -194,8 +209,7 @@ nd_controller_extract_screen_name (XdpSession *session)
 static GstElement *
 nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
 {
-  g_autoptr(GstCaps) caps = NULL;
-  GstElement *pipeline, *src, *dst, *filter;
+  GstElement *pipeline, *src, *dst;
 
   pipeline = gst_pipeline_new ("capture-pipeline");
 
@@ -227,41 +241,40 @@ nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
 
   gst_bin_add_many (GST_BIN (pipeline), src, dst, NULL);
 
-  if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
-    {
-      caps = gst_caps_new_simple ("video/x-raw",
-                                  "width", G_TYPE_INT, 1920,
-                                  "height", G_TYPE_INT, 1080,
-                                  NULL);
-      filter = gst_element_factory_make ("capsfilter", "srcfilter");
-      gst_bin_add (GST_BIN (pipeline), filter);
-      g_object_set (filter, "caps", caps, NULL);
-      g_clear_pointer (&caps, gst_caps_unref);
+  /* No capsfilter — let PipeWire and intervideosink negotiate freely.
+   * This works for both monitor and virtual display captures. */
+  gst_element_link_many (src, dst, NULL);
 
-      gst_element_link_many (src, filter, dst, NULL);
-    }
-  else
-    {
-      gst_element_link_many (src, dst, NULL);
-    }
-
-  gst_element_set_state (pipeline, GST_STATE_PLAYING);
+  /* For virtual displays, don't start immediately — the PipeWire node
+   * needs time to be created by Mutter.  The caller will schedule a
+   * delayed start via g_timeout_add. */
+  if (self->screencast_type != ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+    gst_element_set_state (pipeline, GST_STATE_PLAYING);
 
   return pipeline;
 }
 
-/* Build a capture pipeline from saved PipeWire FD + node ID (for retry). */
+static gboolean
+delayed_start_capture_pipeline (gpointer user_data)
+{
+  NdController *self = ND_CONTROLLER (user_data);
+  self->capture_retry_source_id = 0;
+
+  if (!self->capture_pipeline)
+    return G_SOURCE_REMOVE;
+
+  g_debug ("NdController: Starting virtual display capture pipeline (delayed %dms, node=%u)",
+           VIRTUAL_START_DELAY_MS, self->pipewire_node_id);
+  gst_element_set_state (self->capture_pipeline, GST_STATE_PLAYING);
+  nd_controller_watch_capture_pipeline (self);
+  return G_SOURCE_REMOVE;
+}
+
+/* Build a capture pipeline from saved FD + node ID (for retry). */
 static GstElement *
 nd_controller_build_capture_pipeline_from_saved (NdController *self)
 {
-  g_autoptr(GstCaps) caps = NULL;
-  GstElement *pipeline, *src, *dst, *filter;
-
-  if (self->pipewire_fd < 0)
-    {
-      g_warning ("NdController: No saved PipeWire FD for retry");
-      return NULL;
-    }
+  GstElement *pipeline, *src, *dst;
 
   pipeline = gst_pipeline_new ("capture-pipeline");
 
@@ -273,13 +286,11 @@ nd_controller_build_capture_pipeline_from_saved (NdController *self)
       return NULL;
     }
 
-  /* dup the saved FD so we keep a copy for further retries */
-  gint fd_for_src = dup (self->pipewire_fd);
-  g_autofree gchar *path_str = g_strdup_printf ("%u", self->pipewire_node_id);
-  g_debug ("NdController: Retry with FD=%d, path=%s", fd_for_src, path_str);
+  gint fd_for_src = (self->pipewire_fd >= 0) ? dup (self->pipewire_fd) : -1;
+  g_debug ("NdController: Retry with FD=%d, node=%u (no path, auto-connect)", fd_for_src, self->pipewire_node_id);
+  if (fd_for_src >= 0)
+    g_object_set (src, "fd", fd_for_src, NULL);
   g_object_set (src,
-                "fd", fd_for_src,
-                "path", path_str,
                 "do-timestamp", TRUE,
                 NULL);
   gst_base_src_set_live (GST_BASE_SRC (src), TRUE);
@@ -298,16 +309,7 @@ nd_controller_build_capture_pipeline_from_saved (NdController *self)
                 NULL);
 
   gst_bin_add_many (GST_BIN (pipeline), src, dst, NULL);
-
-  caps = gst_caps_new_simple ("video/x-raw",
-                              "width", G_TYPE_INT, 1920,
-                              "height", G_TYPE_INT, 1080,
-                              NULL);
-  filter = gst_element_factory_make ("capsfilter", "srcfilter");
-  gst_bin_add (GST_BIN (pipeline), filter);
-  g_object_set (filter, "caps", caps, NULL);
-  g_clear_pointer (&caps, gst_caps_unref);
-  gst_element_link_many (src, filter, dst, NULL);
+  gst_element_link_many (src, dst, NULL);
 
   gst_element_set_state (pipeline, GST_STATE_PLAYING);
   return pipeline;
@@ -326,8 +328,7 @@ capture_pipeline_bus_watch (GstBus *bus, GstMessage *msg, gpointer user_data)
 
       /* For virtual displays, schedule a retry if we haven't exceeded max */
       if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL &&
-          self->capture_retry_count < CAPTURE_RETRY_MAX &&
-          self->pipewire_fd >= 0)
+          self->capture_retry_count < CAPTURE_RETRY_MAX)
         {
           self->capture_retry_count++;
           g_debug ("NdController: Scheduling capture pipeline retry %u/%d in %dms",
@@ -833,8 +834,11 @@ nd_screencast_started_cb (GObject      *source_object,
       self->session = g_steal_pointer (&self->new_session);
       self->capture_pipeline = new_capture;
 
+      /* Virtual displays: delay pipeline start so Mutter can create the
+       * PipeWire node.  Non-virtual pipelines are already PLAYING. */
       if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
-        nd_controller_watch_capture_pipeline (self);
+        self->capture_retry_source_id =
+          g_timeout_add (VIRTUAL_START_DELAY_MS, delayed_start_capture_pipeline, self);
 
       /* Update screen name */
       g_clear_pointer (&self->screen_name, g_free);
@@ -857,8 +861,11 @@ nd_screencast_started_cb (GObject      *source_object,
       if (!self->capture_pipeline)
         g_warning ("NdController: Failed to build capture pipeline!");
 
+      /* Virtual displays: delay pipeline start so Mutter can create the
+       * PipeWire node.  Non-virtual pipelines are already PLAYING. */
       if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
-        nd_controller_watch_capture_pipeline (self);
+        self->capture_retry_source_id =
+          g_timeout_add (VIRTUAL_START_DELAY_MS, delayed_start_capture_pipeline, self);
 
       /* Reposition virtual display above physical monitors */
       if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
