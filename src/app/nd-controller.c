@@ -205,7 +205,7 @@ nd_controller_build_capture_pipeline (NdController *self, XdpSession *session)
   if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
     {
       caps = gst_caps_new_simple ("video/x-raw",
-                                  "max-framerate", GST_TYPE_FRACTION, 30, 1,
+                                  "framerate", GST_TYPE_FRACTION, 30, 1,
                                   "width", G_TYPE_INT, 1920,
                                   "height", G_TYPE_INT, 1080,
                                   NULL);
@@ -405,11 +405,11 @@ on_display_state_received (GObject      *source,
           gint w = g_variant_get_int32 (w_v);
           gint h = g_variant_get_int32 (h_v);
 
-          /* Check if this mode is current (property in 5th field if available) */
+          /* Check if this mode is current (properties dict is 7th field, index 6) */
           gboolean is_current = FALSE;
-          if (n_fields >= 5)
+          if (n_fields >= 7)
             {
-              g_autoptr(GVariant) mode_props = g_variant_get_child_value (mode, 4);
+              g_autoptr(GVariant) mode_props = g_variant_get_child_value (mode, 6);
               g_autoptr(GVariant) cur_v = g_variant_lookup_value (mode_props,
                                                                    "is-current",
                                                                    G_VARIANT_TYPE_BOOLEAN);
@@ -717,10 +717,23 @@ static void
 session_closed_cb (NdController *self)
 {
   g_debug ("NdController: Session closed");
+
+  /* If the capture pipeline is still running (e.g. virtual display sessions
+   * close immediately after PipeWire FD is obtained), keep the screen
+   * selection state intact so the user can still connect to sinks. */
+  if (self->capture_pipeline)
+    {
+      g_debug ("NdController: Capture pipeline still active, keeping screen state");
+      g_clear_object (&self->session);
+      return;
+    }
+
   if (self->stream_sink)
     nd_sink_stop_stream (self->stream_sink);
 
   g_clear_object (&self->session);
+  g_clear_pointer (&self->screen_name, g_free);
+  g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
 }
 
 static void
@@ -1036,7 +1049,7 @@ nd_controller_connect_sink (NdController *self, NdSink *sink)
       return;
     }
 
-  if (!self->use_x11 && !self->session)
+  if (!self->use_x11 && !self->session && !self->capture_pipeline)
     {
       g_warning ("NdController: No screen selected — call select_screen first");
       return;
@@ -1137,7 +1150,7 @@ nd_controller_has_screen (NdController *self)
 {
   g_return_val_if_fail (ND_IS_CONTROLLER (self), FALSE);
 
-  return self->session != NULL;
+  return self->session != NULL || self->capture_pipeline != NULL;
 }
 
 const gchar *
