@@ -66,6 +66,8 @@ struct _NdController
 
   gboolean              audio_muted;
   GstElement           *audio_source;  /* live pulsesrc, for mute toggling */
+
+  NdDisplayMode         display_mode;
 };
 
 enum {
@@ -325,6 +327,288 @@ sink_notify_state_cb (NdController *self, GParamSpec *pspec, NdSink *sink)
   g_signal_emit (self, signals[SIGNAL_STATE_CHANGED], 0, (guint) state);
 }
 
+/* --- Virtual display repositioning via Mutter DisplayConfig D-Bus --- */
+
+static void
+on_apply_monitors_config_done (GObject      *source,
+                               GAsyncResult *result,
+                               gpointer      user_data)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GVariant) reply = NULL;
+
+  reply = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source), result, &error);
+  if (error)
+    g_debug ("NdController: ApplyMonitorsConfig failed: %s", error->message);
+  else
+    g_debug ("NdController: Virtual display repositioned above other monitors");
+}
+
+static void
+on_display_state_received (GObject      *source,
+                           GAsyncResult *result,
+                           gpointer      user_data)
+{
+  NdController *self = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GVariant) reply = NULL;
+  GVariantBuilder lm_builder, props_builder;
+  gint virtual_idx = -1;
+  gint min_y = G_MAXINT, min_x = G_MAXINT, max_x = 0;
+  gint virtual_height = 1080, virtual_width = 1920;
+
+  reply = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source), result, &error);
+  if (!reply)
+    {
+      g_debug ("NdController: Could not get display config: %s", error->message);
+      return;
+    }
+
+  guint32 serial;
+  g_autoptr(GVariant) serial_v = g_variant_get_child_value (reply, 0);
+  g_autoptr(GVariant) monitors_v = g_variant_get_child_value (reply, 1);
+  g_autoptr(GVariant) logical_monitors_v = g_variant_get_child_value (reply, 2);
+
+  serial = g_variant_get_uint32 (serial_v);
+
+  gsize n_monitors = g_variant_n_children (monitors_v);
+  gsize n_logical = g_variant_n_children (logical_monitors_v);
+
+  if (n_logical == 0)
+    return;
+
+  /* Build connector -> (current_mode_id, width, height) mapping */
+  GHashTable *connector_mode = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  GHashTable *connector_width = g_hash_table_new (g_str_hash, g_str_equal);
+  GHashTable *connector_height = g_hash_table_new (g_str_hash, g_str_equal);
+
+  /* We store mode_id strings in a GPtrArray for memory management */
+  g_autoptr(GPtrArray) mode_ids = g_ptr_array_new_with_free_func (g_free);
+
+  for (gsize i = 0; i < n_monitors; i++)
+    {
+      g_autoptr(GVariant) monitor = g_variant_get_child_value (monitors_v, i);
+      g_autoptr(GVariant) conn_info = g_variant_get_child_value (monitor, 0);
+      g_autoptr(GVariant) modes_v = g_variant_get_child_value (monitor, 1);
+      g_autoptr(GVariant) conn_name_v = g_variant_get_child_value (conn_info, 0);
+      const gchar *connector = g_variant_get_string (conn_name_v, NULL);
+
+      gsize n_modes = g_variant_n_children (modes_v);
+      for (gsize m = 0; m < n_modes; m++)
+        {
+          g_autoptr(GVariant) mode = g_variant_get_child_value (modes_v, m);
+          gsize n_fields = g_variant_n_children (mode);
+
+          g_autoptr(GVariant) id_v = g_variant_get_child_value (mode, 0);
+          g_autoptr(GVariant) w_v = g_variant_get_child_value (mode, 1);
+          g_autoptr(GVariant) h_v = g_variant_get_child_value (mode, 2);
+
+          const gchar *mode_id = g_variant_get_string (id_v, NULL);
+          gint w = g_variant_get_int32 (w_v);
+          gint h = g_variant_get_int32 (h_v);
+
+          /* Check if this mode is current (property in 5th field if available) */
+          gboolean is_current = FALSE;
+          if (n_fields >= 5)
+            {
+              g_autoptr(GVariant) mode_props = g_variant_get_child_value (mode, 4);
+              g_autoptr(GVariant) cur_v = g_variant_lookup_value (mode_props,
+                                                                   "is-current",
+                                                                   G_VARIANT_TYPE_BOOLEAN);
+              if (cur_v)
+                is_current = g_variant_get_boolean (cur_v);
+            }
+
+          if (is_current)
+            {
+              gchar *mid = g_strdup (mode_id);
+              g_ptr_array_add (mode_ids, mid);
+              g_hash_table_insert (connector_mode, g_strdup (connector), mid);
+              g_hash_table_insert (connector_width, (gchar *) connector,
+                                   GINT_TO_POINTER (w));
+              g_hash_table_insert (connector_height, (gchar *) connector,
+                                   GINT_TO_POINTER (h));
+              break;
+            }
+        }
+    }
+
+  /* Parse logical monitors and find virtual display + bounding box */
+  for (gsize i = 0; i < n_logical; i++)
+    {
+      g_autoptr(GVariant) lmon = g_variant_get_child_value (logical_monitors_v, i);
+      g_autoptr(GVariant) assigned = g_variant_get_child_value (lmon, 5);
+
+      if (g_variant_n_children (assigned) == 0)
+        continue;
+
+      g_autoptr(GVariant) first_mon = g_variant_get_child_value (assigned, 0);
+      g_autoptr(GVariant) cname_v = g_variant_get_child_value (first_mon, 0);
+      const gchar *connector = g_variant_get_string (cname_v, NULL);
+
+      g_autoptr(GVariant) x_v = g_variant_get_child_value (lmon, 0);
+      g_autoptr(GVariant) y_v = g_variant_get_child_value (lmon, 1);
+      gint x = g_variant_get_int32 (x_v);
+      gint y = g_variant_get_int32 (y_v);
+
+      if (g_str_has_prefix (connector, "Virtual"))
+        {
+          virtual_idx = (gint) i;
+          gpointer w_p = g_hash_table_lookup (connector_width, connector);
+          gpointer h_p = g_hash_table_lookup (connector_height, connector);
+          if (w_p) virtual_width = GPOINTER_TO_INT (w_p);
+          if (h_p) virtual_height = GPOINTER_TO_INT (h_p);
+        }
+      else
+        {
+          gpointer w_p = g_hash_table_lookup (connector_width, connector);
+          gint w = w_p ? GPOINTER_TO_INT (w_p) : 1920;
+
+          if (x < min_x) min_x = x;
+          if (y < min_y) min_y = y;
+          if (x + w > max_x) max_x = x + w;
+        }
+    }
+
+  if (virtual_idx < 0)
+    {
+      g_debug ("NdController: No virtual display found in display config");
+      g_hash_table_unref (connector_mode);
+      g_hash_table_unref (connector_width);
+      g_hash_table_unref (connector_height);
+      return;
+    }
+
+  if (min_y == G_MAXINT)
+    min_y = 0;
+  if (min_x == G_MAXINT)
+    min_x = 0;
+
+  /* Calculate virtual display position: centered above all physical monitors */
+  gint total_physical_width = max_x - min_x;
+  gint virt_x = min_x + (total_physical_width - virtual_width) / 2;
+  gint virt_y = min_y - virtual_height;
+
+  g_debug ("NdController: Repositioning virtual display to (%d, %d) [%dx%d above physical monitors]",
+           virt_x, virt_y, virtual_width, virtual_height);
+
+  /* Build ApplyMonitorsConfig logical_monitors: a(iiduba(ssa{sv})) */
+  g_variant_builder_init (&lm_builder, G_VARIANT_TYPE ("a(iiduba(ssa{sv}))"));
+
+  for (gsize i = 0; i < n_logical; i++)
+    {
+      g_autoptr(GVariant) lmon = g_variant_get_child_value (logical_monitors_v, i);
+      g_autoptr(GVariant) assigned = g_variant_get_child_value (lmon, 5);
+
+      if (g_variant_n_children (assigned) == 0)
+        continue;
+
+      g_autoptr(GVariant) ox_v = g_variant_get_child_value (lmon, 0);
+      g_autoptr(GVariant) oy_v = g_variant_get_child_value (lmon, 1);
+      g_autoptr(GVariant) scale_v = g_variant_get_child_value (lmon, 2);
+      g_autoptr(GVariant) transform_v = g_variant_get_child_value (lmon, 3);
+      g_autoptr(GVariant) primary_v = g_variant_get_child_value (lmon, 4);
+
+      gint ox = g_variant_get_int32 (ox_v);
+      gint oy = g_variant_get_int32 (oy_v);
+      gdouble scale = g_variant_get_double (scale_v);
+      guint32 transform = g_variant_get_uint32 (transform_v);
+      gboolean is_primary = g_variant_get_boolean (primary_v);
+
+      /* Override position for virtual display */
+      if ((gint) i == virtual_idx)
+        {
+          ox = virt_x;
+          oy = virt_y;
+        }
+
+      /* Build monitors sub-array for this logical monitor */
+      GVariantBuilder mons_builder;
+      g_variant_builder_init (&mons_builder, G_VARIANT_TYPE ("a(ssa{sv})"));
+
+      gsize n_assigned = g_variant_n_children (assigned);
+      for (gsize j = 0; j < n_assigned; j++)
+        {
+          g_autoptr(GVariant) asgn_mon = g_variant_get_child_value (assigned, j);
+          g_autoptr(GVariant) asgn_conn_v = g_variant_get_child_value (asgn_mon, 0);
+          const gchar *asgn_conn = g_variant_get_string (asgn_conn_v, NULL);
+
+          const gchar *mode_id = g_hash_table_lookup (connector_mode, asgn_conn);
+          if (!mode_id)
+            {
+              g_debug ("NdController: No current mode for connector %s, skipping", asgn_conn);
+              continue;
+            }
+
+          GVariantBuilder mon_props;
+          g_variant_builder_init (&mon_props, G_VARIANT_TYPE ("a{sv}"));
+
+          g_variant_builder_add (&mons_builder, "(ssa{sv})",
+                                 asgn_conn, mode_id, &mon_props);
+        }
+
+      g_variant_builder_add (&lm_builder, "(iiduba(ssa{sv}))",
+                             ox, oy, scale, transform, is_primary,
+                             &mons_builder);
+    }
+
+  g_variant_builder_init (&props_builder, G_VARIANT_TYPE ("a{sv}"));
+
+  /* Apply with method=1 (temporary, reverts after 20s if not confirmed) */
+  g_dbus_connection_call (G_DBUS_CONNECTION (source),
+                          "org.gnome.Mutter.DisplayConfig",
+                          "/org/gnome/Mutter/DisplayConfig",
+                          "org.gnome.Mutter.DisplayConfig",
+                          "ApplyMonitorsConfig",
+                          g_variant_new ("(uua(iiduba(ssa{sv}))a{sv})",
+                                         serial,
+                                         (guint32) 1,
+                                         &lm_builder,
+                                         &props_builder),
+                          NULL,
+                          G_DBUS_CALL_FLAGS_NONE,
+                          -1,
+                          self->cancellable,
+                          on_apply_monitors_config_done,
+                          self);
+
+  g_hash_table_unref (connector_mode);
+  g_hash_table_unref (connector_width);
+  g_hash_table_unref (connector_height);
+}
+
+static gboolean
+reposition_virtual_display_timeout (gpointer user_data)
+{
+  NdController *self = user_data;
+  g_autoptr(GError) error = NULL;
+  GDBusConnection *conn;
+
+  conn = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
+  if (!conn)
+    {
+      g_debug ("NdController: Cannot get session bus for display config: %s",
+               error->message);
+      return G_SOURCE_REMOVE;
+    }
+
+  g_dbus_connection_call (conn,
+                          "org.gnome.Mutter.DisplayConfig",
+                          "/org/gnome/Mutter/DisplayConfig",
+                          "org.gnome.Mutter.DisplayConfig",
+                          "GetCurrentState",
+                          NULL,
+                          NULL,
+                          G_DBUS_CALL_FLAGS_NONE,
+                          -1,
+                          self->cancellable,
+                          on_display_state_received,
+                          self);
+
+  g_object_unref (conn);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 nd_screencast_started_cb (GObject      *source_object,
                           GAsyncResult *result,
@@ -406,6 +690,10 @@ nd_screencast_started_cb (GObject      *source_object,
       g_clear_pointer (&self->screen_name, g_free);
       self->screen_name = nd_controller_extract_screen_name (self->session);
 
+      /* Reposition virtual display above physical monitors */
+      if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+        g_timeout_add (500, reposition_virtual_display_timeout, self);
+
       g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
     }
   else
@@ -418,6 +706,10 @@ nd_screencast_started_cb (GObject      *source_object,
       self->capture_pipeline = nd_controller_build_capture_pipeline (self, self->session);
       if (!self->capture_pipeline)
         g_warning ("NdController: Failed to build capture pipeline!");
+
+      /* Reposition virtual display above physical monitors */
+      if (self->screencast_type == ND_SCREEN_CAST_SOURCE_TYPE_VIRTUAL)
+        g_timeout_add (500, reposition_virtual_display_timeout, self);
 
       g_signal_emit (self, signals[SIGNAL_SCREEN_CHANGED], 0);
     }
@@ -831,15 +1123,24 @@ nd_controller_select_screen (NdController *self)
         }
     }
 
-  xdp_portal_create_screencast_session (self->portal,
-                                        XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL,
-                                        XDP_SCREENCAST_FLAG_NONE,
-                                        XDP_CURSOR_MODE_EMBEDDED,
-                                        XDP_PERSIST_MODE_NONE,
-                                        NULL,
-                                        self->cancellable,
-                                        nd_screencast_init_cb,
-                                        self);
+  {
+    XdpOutputType output_types;
+
+    if (self->display_mode == ND_DISPLAY_MODE_EXTEND)
+      output_types = XDP_OUTPUT_VIRTUAL;
+    else
+      output_types = XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL;
+
+    xdp_portal_create_screencast_session (self->portal,
+                                          output_types,
+                                          XDP_SCREENCAST_FLAG_NONE,
+                                          XDP_CURSOR_MODE_EMBEDDED,
+                                          XDP_PERSIST_MODE_NONE,
+                                          NULL,
+                                          self->cancellable,
+                                          nd_screencast_init_cb,
+                                          self);
+  }
 }
 
 gboolean
@@ -880,4 +1181,29 @@ nd_controller_get_muted (NdController *self)
   g_return_val_if_fail (ND_IS_CONTROLLER (self), FALSE);
 
   return self->audio_muted;
+}
+
+void
+nd_controller_set_display_mode (NdController *self, NdDisplayMode mode)
+{
+  g_return_if_fail (ND_IS_CONTROLLER (self));
+
+  if (self->display_mode == mode)
+    return;
+
+  self->display_mode = mode;
+  g_debug ("NdController: Display mode set to %s",
+           mode == ND_DISPLAY_MODE_EXTEND ? "Extend" : "Mirror");
+
+  /* Re-select screen with new mode if we have an existing session */
+  if (self->session || self->use_x11)
+    nd_controller_select_screen (self);
+}
+
+NdDisplayMode
+nd_controller_get_display_mode (NdController *self)
+{
+  g_return_val_if_fail (ND_IS_CONTROLLER (self), ND_DISPLAY_MODE_MIRROR);
+
+  return self->display_mode;
 }

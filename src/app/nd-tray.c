@@ -29,6 +29,7 @@
 #define MENU_ID_DEBUG_TOGGLE  6
 #define MENU_ID_SAVE_LOG      7
 #define MENU_ID_MUTE_TOGGLE   8
+#define MENU_ID_DISPLAY_MODE  9
 #define MENU_ID_SEPARATOR_1   90
 #define MENU_ID_SEPARATOR_2   91
 #define MENU_ID_SINK_BASE     100
@@ -320,6 +321,12 @@ build_menu_layout (NdTray *self)
   else
     add_menu_item (&children, MENU_ID_MUTE_TOGGLE, "Mute Audio", TRUE);
 
+  /* Display mode toggle */
+  if (nd_controller_get_display_mode (self->controller) == ND_DISPLAY_MODE_EXTEND)
+    add_menu_item (&children, MENU_ID_DISPLAY_MODE, "Switch to Mirror Display", TRUE);
+  else
+    add_menu_item (&children, MENU_ID_DISPLAY_MODE, "Switch to Extend Display", TRUE);
+
   /* Separator + Debug + Quit */
   add_separator (&children, MENU_ID_SEPARATOR_2);
 
@@ -400,6 +407,17 @@ dbusmenu_method_call (GDBusConnection       *connection,
                   nd_controller_set_muted (self->controller,
                                            !nd_controller_get_muted (self->controller));
                   notify_layout_updated (self);
+                  break;
+
+                case MENU_ID_DISPLAY_MODE:
+                  {
+                    NdDisplayMode cur = nd_controller_get_display_mode (self->controller);
+                    NdDisplayMode next = (cur == ND_DISPLAY_MODE_MIRROR)
+                                          ? ND_DISPLAY_MODE_EXTEND
+                                          : ND_DISPLAY_MODE_MIRROR;
+                    nd_controller_set_display_mode (self->controller, next);
+                    notify_layout_updated (self);
+                  }
                   break;
 
                 case MENU_ID_DEBUG_TOGGLE:

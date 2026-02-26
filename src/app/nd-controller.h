@@ -48,4 +48,8 @@ void          nd_controller_set_muted      (NdController *self,
                                             gboolean      muted);
 gboolean      nd_controller_get_muted      (NdController *self);
 
+void          nd_controller_set_display_mode (NdController *self,
+                                              NdDisplayMode mode);
+NdDisplayMode nd_controller_get_display_mode (NdController *self);
+
 G_END_DECLS

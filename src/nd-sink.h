@@ -49,6 +49,11 @@ typedef enum {
 } NdScreenCastSourceType;
 
 typedef enum {
+  ND_DISPLAY_MODE_MIRROR,
+  ND_DISPLAY_MODE_EXTEND,
+} NdDisplayMode;
+
+typedef enum {
   /* internal protocols */
   ND_SINK_PROTOCOL_META,
   ND_SINK_PROTOCOL_DUMMY_WFD_P2P,
