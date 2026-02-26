@@ -66,8 +66,6 @@ struct _NdController
 
   gboolean              audio_muted;
   GstElement           *audio_source;  /* live pulsesrc, for mute toggling */
-
-  NdDisplayMode         display_mode;
 };
 
 enum {
@@ -1123,24 +1121,15 @@ nd_controller_select_screen (NdController *self)
         }
     }
 
-  {
-    XdpOutputType output_types;
-
-    if (self->display_mode == ND_DISPLAY_MODE_EXTEND)
-      output_types = XDP_OUTPUT_VIRTUAL;
-    else
-      output_types = XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL;
-
-    xdp_portal_create_screencast_session (self->portal,
-                                          output_types,
-                                          XDP_SCREENCAST_FLAG_NONE,
-                                          XDP_CURSOR_MODE_EMBEDDED,
-                                          XDP_PERSIST_MODE_NONE,
-                                          NULL,
-                                          self->cancellable,
-                                          nd_screencast_init_cb,
-                                          self);
-  }
+  xdp_portal_create_screencast_session (self->portal,
+                                        XDP_OUTPUT_MONITOR | XDP_OUTPUT_WINDOW | XDP_OUTPUT_VIRTUAL,
+                                        XDP_SCREENCAST_FLAG_NONE,
+                                        XDP_CURSOR_MODE_EMBEDDED,
+                                        XDP_PERSIST_MODE_NONE,
+                                        NULL,
+                                        self->cancellable,
+                                        nd_screencast_init_cb,
+                                        self);
 }
 
 gboolean
@@ -1183,27 +1172,3 @@ nd_controller_get_muted (NdController *self)
   return self->audio_muted;
 }
 
-void
-nd_controller_set_display_mode (NdController *self, NdDisplayMode mode)
-{
-  g_return_if_fail (ND_IS_CONTROLLER (self));
-
-  if (self->display_mode == mode)
-    return;
-
-  self->display_mode = mode;
-  g_debug ("NdController: Display mode set to %s",
-           mode == ND_DISPLAY_MODE_EXTEND ? "Extend" : "Mirror");
-
-  /* Re-select screen with new mode if we have an existing session */
-  if (self->session || self->use_x11)
-    nd_controller_select_screen (self);
-}
-
-NdDisplayMode
-nd_controller_get_display_mode (NdController *self)
-{
-  g_return_val_if_fail (ND_IS_CONTROLLER (self), ND_DISPLAY_MODE_MIRROR);
-
-  return self->display_mode;
-}
