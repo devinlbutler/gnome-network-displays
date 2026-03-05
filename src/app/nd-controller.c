@@ -540,6 +540,7 @@ on_display_state_received (GObject      *source,
       g_autoptr(GVariant) modes_v = g_variant_get_child_value (monitor, 1);
       g_autoptr(GVariant) conn_name_v = g_variant_get_child_value (conn_info, 0);
       const gchar *connector = g_variant_get_string (conn_name_v, NULL);
+      g_debug ("NdController: DisplayConfig monitor[%zu]: connector='%s'", i, connector);
 
       gsize n_modes = g_variant_n_children (modes_v);
       for (gsize m = 0; m < n_modes; m++)
@@ -598,6 +599,8 @@ on_display_state_received (GObject      *source,
       g_autoptr(GVariant) y_v = g_variant_get_child_value (lmon, 1);
       gint x = g_variant_get_int32 (x_v);
       gint y = g_variant_get_int32 (y_v);
+
+      g_debug ("NdController: DisplayConfig logical[%zu]: connector='%s' x=%d y=%d", i, connector, x, y);
 
       if (g_str_has_prefix (connector, "Virtual"))
         {
